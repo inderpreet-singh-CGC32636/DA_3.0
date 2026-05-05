@@ -1,0 +1,20 @@
+# Ignore everything by default
+*
+!.gitignore
+
+# V4 Python pipelines
+!run_he_v4.py
+!run_msme_v4.py
+
+# SQL folder and v4-dependent queries only
+!sql/
+!sql/simple_he_eligible.sql
+!sql/he_assets.sql
+!sql/he_dpd_history.sql
+!sql/he_bounce.sql
+!sql/simple_msme_eligible.sql
+!sql/msme_assets.sql
+!sql/msme_dpd_history.sql
+!sql/msme_bounce.sql
+!sql/restructure.sql
+!sql/abhfl_serviceable.sql
