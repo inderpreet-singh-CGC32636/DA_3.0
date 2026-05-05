@@ -1,6 +1,6 @@
 # %% ── Imports & Config ──────────────────────────────────────────────────────
 """
-HE DA Pool Selection — v5
+HE DA Pool Selection — Final
 Stage 1  Load    : simple_he_eligible + he_assets + he_dpd_history + he_bounce + restructure + abhfl_serviceable
 Stage 2  Derive  : age, MOB, CIBIL, LTV, DPD flags, bounce counts, profile, seasoning
 Stage 3a Bajaj   : hard filters → BAJAJ_HARD_FILTER_PASS
@@ -23,7 +23,7 @@ SQL_DPD         = THIS_FOLDER / "sql" / "he_dpd_history.sql"
 SQL_BOUNCE      = THIS_FOLDER / "sql" / "he_bounce.sql"
 SQL_RESTRUCTURE = THIS_FOLDER / "sql" / "restructure.sql"
 SQL_SERVICEABLE = THIS_FOLDER / "sql" / "abhfl_serviceable.sql"
-OUTPUT_FOLDER   = THIS_FOLDER / "output" / "he_v5"
+OUTPUT_FOLDER   = THIS_FOLDER / "output" / "he_final"
 
 
 # %% ── Database Helpers ───────────────────────────────────────────────────────
@@ -588,7 +588,7 @@ def main():
     for name, pool in {**bajaj_pools, **abfl_pools}.items():
         df = flag_col(df, pool["LAN"], f"ELIGIBLE_{name}")
 
-    out_file = OUTPUT_FOLDER / f"he_v5_{ts}.csv"
+    out_file = OUTPUT_FOLDER / f"he_final_{ts}.csv"
     df.to_csv(out_file, index=False)
 
     print(f"\n{'='*50}")

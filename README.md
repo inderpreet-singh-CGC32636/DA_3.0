@@ -7,10 +7,11 @@ Python-based eligibility pipeline for Bajaj Finance and ABFL DA pool selection a
 ## Repository Structure
 
 ```
-├── run_he_v5.py              # HE pipeline v5 — simplified, readable code (recommended)
-├── run_msme_v5.py            # MSME pipeline v5 — simplified, readable code (recommended)
-├── run_he_v4.py              # HE pipeline v4 — with #%% cell markers
-├── run_msme_v4.py            # MSME pipeline v4 — with #%% cell markers
+├── run_he_final.py           # HE pipeline — production ready
+├── run_msme_final.py         # MSME pipeline — production ready
+├── archive/
+│   ├── run_he_v4.py          # HE v4 — with #%% cell markers
+│   └── run_msme_v4.py        # MSME v4 — with #%% cell markers
 └── sql/
     ├── simple_he_eligible.sql        # Base HE loan universe
     ├── he_assets.sql                 # HE collateral / property data
@@ -88,13 +89,11 @@ RS_HOST, RS_PORT, RS_DB, RS_USER, RS_PASSWORD
 ## Running
 
 ```bash
-python run_he_v5.py      # Home Equity  (v5 — recommended)
-python run_msme_v5.py    # MSME         (v5 — recommended)
-python run_he_v4.py      # Home Equity  (v4 — with #%% cells)
-python run_msme_v4.py    # MSME         (v4 — with #%% cells)
+python run_he_final.py      # Home Equity
+python run_msme_final.py    # MSME
 ```
 
-Output CSVs are written to `output/he_v5/` and `output/msme_v5/` with a datestamp suffix.
+Output CSVs are written to `output/he_final/` and `output/msme_final/` with a datestamp suffix.
 
 ---
 
