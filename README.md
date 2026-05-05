@@ -7,8 +7,10 @@ Python-based eligibility pipeline for Bajaj Finance and ABFL DA pool selection a
 ## Repository Structure
 
 ```
-├── run_he_v4.py              # HE pipeline — Bajaj + ABFL filters & eligibility
-├── run_msme_v4.py            # MSME pipeline — Bajaj + ABFL filters & eligibility
+├── run_he_v5.py              # HE pipeline v5 — simplified, readable code (recommended)
+├── run_msme_v5.py            # MSME pipeline v5 — simplified, readable code (recommended)
+├── run_he_v4.py              # HE pipeline v4 — with #%% cell markers
+├── run_msme_v4.py            # MSME pipeline v4 — with #%% cell markers
 └── sql/
     ├── simple_he_eligible.sql        # Base HE loan universe
     ├── he_assets.sql                 # HE collateral / property data
@@ -26,14 +28,14 @@ Python-based eligibility pipeline for Bajaj Finance and ABFL DA pool selection a
 
 ## Pipeline Stages
 
-| Stage | Description |
-|---|---|
-| 1 — Load | Pull base loans + assets + DPD history + bounce + restructure + pincode from Redshift |
-| 2 — Derive | Calculate `MOB`, `SEASONING_DAYS`, `PEAK_DPD_EVER`, `BOUNCE_COUNT`, `LTV_ORIGINATION`, `CALCULATED_LTV`, `AGE_CURRENT`, `AGE_AT_MATURITY`, `PROFILE_TYPE`, property fields |
-| 3a — Bajaj filters | Apply all Bajaj hard filters in sequence; record first rejection reason per loan |
-| 3b — ABFL filters | Apply all ABFL hard filters in sequence; record first rejection reason per loan |
-| 4 — Eligibility | Layer CIBIL score thresholds (700 / 675) + UDYAM flag on hard-filter-passing loans |
-| 5 — Output | Write CSV with all flags, rejection reasons, and eligibility columns |
+```
+Stage 1  Load    : simple_he_eligible + he_assets + he_dpd_history + he_bounce + restructure + abhfl_serviceable
+Stage 2  Derive  : age, MOB, CIBIL, LTV, DPD flags, bounce counts, profile, seasoning
+Stage 3a Bajaj   : hard filters → BAJAJ_HARD_FILTER_PASS
+Stage 3b ABFL    : hard filters → ABFL_HARD_FILTER_PASS
+Stage 4  Eligible: CIBIL cutoff + Udyam split → ELIGIBLE_* columns
+Stage 5  Output  : CSV with all flags and rejection reasons
+```
 
 ---
 
@@ -86,11 +88,13 @@ RS_HOST, RS_PORT, RS_DB, RS_USER, RS_PASSWORD
 ## Running
 
 ```bash
-python run_he_v4.py      # Home Equity
-python run_msme_v4.py    # MSME
+python run_he_v5.py      # Home Equity  (v5 — recommended)
+python run_msme_v5.py    # MSME         (v5 — recommended)
+python run_he_v4.py      # Home Equity  (v4 — with #%% cells)
+python run_msme_v4.py    # MSME         (v4 — with #%% cells)
 ```
 
-Output CSVs are written to `output/he_v4/` and `output/msme_v4/` with a datestamp suffix.
+Output CSVs are written to `output/he_v5/` and `output/msme_v5/` with a datestamp suffix.
 
 ---
 
