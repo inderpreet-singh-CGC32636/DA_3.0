@@ -506,9 +506,10 @@ BAJAJ_ELIGIBILITY = {
 # Individual applicants: CIBIL >= threshold. Org applicants: auto-pass.
 
 def abfl_eligible(df, threshold):
-    is_org = df["SZ_APPL_CATEGORY_CODE"].fillna("").str.upper().isin(["CO", "CORP", "TRUST", "HUF"])
-    cibil  = to_number(df, "CIBIL_SCORE", -10)
-    return df.loc[(cibil >= threshold) | (cibil == -1) | is_org]
+    # SQL: LIKE '%I%' = Individual needs CIBIL >= threshold (no-score excluded); NOT LIKE '%I%' = Org auto-passes
+    is_individual = df["SZ_APPL_CATEGORY_CODE"].fillna("").str.upper().str.contains("I")
+    cibil = to_number(df, "CIBIL_SCORE", -10)
+    return df.loc[(is_individual & (cibil >= threshold)) | ~is_individual]
 
 def abfl_eligible_700(df): return abfl_eligible(df, 700)
 def abfl_eligible_675(df): return abfl_eligible(df, 675)
