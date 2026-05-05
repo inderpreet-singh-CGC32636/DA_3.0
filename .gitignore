@@ -1,6 +1,7 @@
 # Ignore everything by default
 *
 !.gitignore
+!README.md
 
 # V4 Python pipelines
 !run_he_v4.py
