@@ -1,8 +1,8 @@
 -- ============================================================
 -- DA POOL SANCTION FORMAT – Bulk Extract (ABFL-Eligible HE/LAP @ CIBIL 675)
 -- Sheet: "Required for pool shortlisting"  |  132 columns
--- Universe: CGHFL HE/LAP loans passing ABFL eligibility at CIBIL >= 675
---           Key criteria from unified_da_pool_selection_v3.sql embedded in CTE 0
+-- Universe: DA_HE_AB table (abfl_overall_eligibility_at_675 = 1)
+--           All eligibility criteria pre-computed in EXTERNAL_CURATED.DA_HE_AB
 -- POS / Overdue / Rate: CURRENT_DATE live snapshot from loan_dtl_cghfl
 -- DPD history / Bounce strings: loan_status_monthly + CBR tables
 -- NO {LAN_LIST} placeholder – universe is embedded as a subquery
@@ -12,61 +12,14 @@
 WITH
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- CTE 0: Universe — ABFL-eligible HE/LAP loans at CIBIL >= 675
--- Applies key ABFL eligibility criteria from unified_da_pool_selection_v3.sql
--- Criteria: HE/LAP product, sanction 3L-2Cr, no NPA/restructure, cur_dpd < 30,
---           balance tenure <= 174m, tenor <= 180m, CIBIL >= 675 (individual),
---           not funder/DA-assigned, not refinanced/NHB/NABARD
+-- CTE 0: Universe — pull directly from DA_HE_AB where abfl_overall_eligibility_at_675 = 1
+-- All 18 ABFL criteria (LTV<=70, property type, seasoning>=180d, age, bounces, etc.)
+-- are pre-evaluated in EXTERNAL_CURATED.DA_HE_AB. No recomputation needed here.
 -- ─────────────────────────────────────────────────────────────────────────────
 target_lans AS (
-    SELECT ld.sz_loan_account_no, ld.sz_application_no
-    FROM analytics_reporting.loan_dtl_cghfl ld
-    -- Join primary borrower for CIBIL + category code
-    LEFT JOIN (
-        SELECT sz_application_no, sz_cibil_score, sz_appl_category_code
-        FROM (
-            SELECT sz_application_no, sz_cibil_score, sz_appl_category_code,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY sz_application_no
-                       ORDER BY CASE WHEN sz_appl_type_code = 'BORROWER' THEN 0 ELSE 1 END,
-                                i_applicant_id
-                   ) AS rk
-            FROM analytics_reporting.applicant_basic_dtl_cghfl
-        ) t WHERE rk = 1
-    ) bor ON bor.sz_application_no = ld.sz_application_no
-    WHERE ld.loan_status = 'APPROVED'
-      AND UPPER(NVL(ld.c_final_disb_yn, '')) = 'Y'
-      -- HE / LAP product
-      AND (
-          UPPER(ld.sz_product_desc) LIKE '%LAP%'
-          OR UPPER(ld.sz_product_desc) LIKE '%HOME EQUITY%'
-          OR UPPER(ld.sz_portfolio_desc) LIKE '%HE%'
-          OR UPPER(ld.sz_portfolio_desc) LIKE '%HOME EQUITY%'
-          OR UPPER(ld.sz_portfolio_desc) LIKE '%HOUSING LOAN EQUITY%'
-      )
-      -- Sanction amount 3L – 2Cr
-      AND ld.f_sanctioned_amt BETWEEN 300000 AND 20000000
-      -- No restructure, no NPA
-      AND COALESCE(ld.c_restructure_yn, 'N') != 'Y'
-      AND COALESCE(ld.npa_flag, 'N') = 'N'
-      -- Current DPD < 30
-      AND COALESCE(ld.i_cur_dpd, 0) < 30
-      -- Balance tenure <= 174m; original tenor <= 180m
-      AND COALESCE(ld."balance tenure", 999) <= 174
-      AND COALESCE(ld.i_tenor, 999) <= 180
-      -- Not already funder-assigned / DA / refinanced / NHB / NABARD
-      AND ld.sz_funder_name IS NULL
-      AND ld."direct assignment" IS NULL
-      AND ld.refinance_scheme IS NULL
-      AND ld.sz_nabard_name IS NULL
-      AND ld.nhb IS NULL
-      -- CIBIL >= 675 for Individual; non-individual category exempt
-      AND (
-          UPPER(COALESCE(bor.sz_appl_category_code, '')) NOT LIKE '%I%'
-          OR TRY_CAST(bor.sz_cibil_score AS INTEGER) >= 675
-          OR TRY_CAST(bor.sz_cibil_score AS INTEGER) = -1
-          OR bor.sz_cibil_score IS NULL
-      )
+    SELECT sz_loan_account_no, sz_application_no
+    FROM "prod_analytics_db"."EXTERNAL_CURATED"."DA_HE_AB"
+    WHERE abfl_overall_eligibility_at_675 = 1
 ),
 
 -- ─────────────────────────────────────────────────────────────────────────────
