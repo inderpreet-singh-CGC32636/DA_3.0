@@ -87,18 +87,34 @@ appl_ranked AS (
             WHEN apt.sz_org_name  IS NOT NULL THEN 'Non-Individual'
             ELSE NULL
         END                                                     AS cust_type,
+        -- Customer sub-type from sz_appl_category_code (better coverage than sz_salary_typ)
+        apt.sz_appl_category_code                               AS cust_subtype,
+        -- SENP/SEP classification via income_program (most populated field)
         CASE
-            WHEN UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'            THEN 'Salaried'
-            WHEN UPPER(TRIM(apt.sz_salary_typ)) IN ('SENP','SEP')  THEN 'Self-Employed'
-            ELSE apt.sz_salary_typ
-        END                                                     AS cust_subtype,
-        UPPER(TRIM(apt.sz_salary_typ))                          AS salary_typ,
+            WHEN LOWER(apt.income_program) LIKE '%salar%'             THEN 'SALARIED'
+            WHEN LOWER(apt.income_program) LIKE '%senp%'
+              OR LOWER(apt.income_program) LIKE '%sep%'
+              OR apt.income_program IN ('Self Employed - NIP-CPM', 'Self Employed - NIP')
+                                                                      THEN 'SENP'
+            WHEN UPPER(TRIM(apt.sz_salary_typ)) IN ('SENP','SEP')     THEN 'SENP'
+            WHEN apt.income_program IS NOT NULL THEN UPPER(apt.income_program)
+            ELSE NULL
+        END                                                     AS senp_sep_type,
+        -- Occupation: sz_primary_occupation is most populated; industry types as fallback
+        COALESCE(
+            NULLIF(TRIM(apt.sz_primary_occupation), ''),
+            NULLIF(TRIM(apt.ind_sz_industry_type), ''),
+            NULLIF(TRIM(apt.org_sz_industry_type), '')
+        )                                                       AS occupation,
+        -- Income assessment method
+        apt.income_type                                         AS income_type,
+        -- Constitution (for non-individual borrowers)
+        apt.sz_org_constitution                                 AS constitution,
         apt.c_gender,
         apt.dt_birth_date,
         NULLIF(TRIM(NVL(apt.sz_id2, apt.sz_panno)), '')        AS pan,
         apt.sz_cibil_score,
         apt.c_incm_consid,
-        apt.sz_primary_occupation,
         ROW_NUMBER() OVER (
             PARTITION BY apt.sz_application_no
             ORDER BY
@@ -125,8 +141,10 @@ appl_pivot AS (
         MAX(CASE WHEN seq = 1 THEN cust_type  END)             AS a1_cust_type,
         MAX(CASE WHEN seq = 1 THEN c_incm_consid END)          AS a1_is_financial,
         MAX(CASE WHEN seq = 1 THEN cust_subtype END)           AS a1_subtype,
-        MAX(CASE WHEN seq = 1 AND salary_typ IN ('SENP','SEP') THEN salary_typ END) AS a1_senp_sep,
-        MAX(CASE WHEN seq = 1 THEN sz_primary_occupation END)  AS a1_occupation,
+        MAX(CASE WHEN seq = 1 AND senp_sep_type IN ('SENP','SEP') THEN senp_sep_type END) AS a1_senp_sep,
+        MAX(CASE WHEN seq = 1 THEN occupation END)              AS a1_occupation,
+        MAX(CASE WHEN seq = 1 THEN income_type END)             AS a1_income_type,
+        MAX(CASE WHEN seq = 1 THEN constitution END)            AS a1_constitution,
         MAX(CASE WHEN seq = 1 THEN dt_birth_date END)          AS a1_dob,
         MAX(CASE WHEN seq = 1 THEN pan END)                    AS a1_pan,
         MAX(CASE WHEN seq = 1 THEN sz_cibil_score END)         AS a1_cibil,
@@ -506,8 +524,8 @@ SELECT
     -- Col 12
     ap.a1_occupation                                           AS "Occupation/Industry",
 
-    -- Col 13 (constitution from application_cghfl)
-    la.constitution                                            AS "Constitution",
+    -- Col 13 (sz_org_constitution from applicant_basic_dtl_cghfl for non-individual borrowers)
+    ap.a1_constitution                                         AS "Constitution",
 
     -- Col 14
     ap.a1_dob                                                  AS "DOB/DOI \n(Primary Applicant)",
@@ -695,8 +713,8 @@ SELECT
     -- Col 69
     la.end_use_loan_description                                AS "End use as per end use letter /Sanction letter",
 
-    -- Col 70  (income program type, derived from sz_salary_typ of primary borrower)
-    ap.a1_subtype                                              AS "Income Assesment method - Income /Surrogate/Assessed",
+    -- Col 70  (income_type from applicant_basic_dtl_cghfl: Income/Surrogate/Assessed)
+    ap.a1_income_type                                          AS "Income Assesment method - Income /Surrogate/Assessed",
 
     -- ── Key Dates (Cols 71-75) ────────────────────────────────────────────
 

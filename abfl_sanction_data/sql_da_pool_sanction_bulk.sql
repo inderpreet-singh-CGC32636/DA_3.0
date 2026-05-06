@@ -1,8 +1,8 @@
 -- ============================================================
--- DA POOL SANCTION FORMAT – Bulk Extract (ALL HE/LAP Active Loans)
+-- DA POOL SANCTION FORMAT – Bulk Extract (ABFL-Eligible HE/LAP @ CIBIL 675)
 -- Sheet: "Required for pool shortlisting"  |  132 columns
--- Universe: ALL CGHFL HE/LAP approved + fully disbursed loans
---           (same base filter as unified_da_pool_selection_v3.sql)
+-- Universe: CGHFL HE/LAP loans passing ABFL eligibility at CIBIL >= 675
+--           Key criteria from unified_da_pool_selection_v3.sql embedded in CTE 0
 -- POS / Overdue / Rate: CURRENT_DATE live snapshot from loan_dtl_cghfl
 -- DPD history / Bounce strings: loan_status_monthly + CBR tables
 -- NO {LAN_LIST} placeholder – universe is embedded as a subquery
@@ -12,20 +12,60 @@
 WITH
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- CTE 0: Universe — all active HE/LAP loans (replaces {LAN_LIST})
--- Mirrors base_loans filter from unified_da_pool_selection_v3.sql
+-- CTE 0: Universe — ABFL-eligible HE/LAP loans at CIBIL >= 675
+-- Applies key ABFL eligibility criteria from unified_da_pool_selection_v3.sql
+-- Criteria: HE/LAP product, sanction 3L-2Cr, no NPA/restructure, cur_dpd < 30,
+--           balance tenure <= 174m, tenor <= 180m, CIBIL >= 675 (individual),
+--           not funder/DA-assigned, not refinanced/NHB/NABARD
 -- ─────────────────────────────────────────────────────────────────────────────
 target_lans AS (
-    SELECT sz_loan_account_no, sz_application_no
-    FROM analytics_reporting.loan_dtl_cghfl
-    WHERE loan_status = 'APPROVED'
-      AND UPPER(NVL(c_final_disb_yn, '')) = 'Y'
+    SELECT ld.sz_loan_account_no, ld.sz_application_no
+    FROM analytics_reporting.loan_dtl_cghfl ld
+    -- Join primary borrower for CIBIL + category code
+    LEFT JOIN (
+        SELECT sz_application_no, sz_cibil_score, sz_appl_category_code
+        FROM (
+            SELECT sz_application_no, sz_cibil_score, sz_appl_category_code,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sz_application_no
+                       ORDER BY CASE WHEN sz_appl_type_code = 'BORROWER' THEN 0 ELSE 1 END,
+                                i_applicant_id
+                   ) AS rk
+            FROM analytics_reporting.applicant_basic_dtl_cghfl
+        ) t WHERE rk = 1
+    ) bor ON bor.sz_application_no = ld.sz_application_no
+    WHERE ld.loan_status = 'APPROVED'
+      AND UPPER(NVL(ld.c_final_disb_yn, '')) = 'Y'
+      -- HE / LAP product
       AND (
-          UPPER(sz_product_desc) LIKE '%LAP%'
-          OR UPPER(sz_product_desc) LIKE '%HOME EQUITY%'
-          OR UPPER(sz_portfolio_desc) LIKE '%HE%'
-          OR UPPER(sz_portfolio_desc) LIKE '%HOME EQUITY%'
-          OR UPPER(sz_portfolio_desc) LIKE '%HOUSING LOAN EQUITY%'
+          UPPER(ld.sz_product_desc) LIKE '%LAP%'
+          OR UPPER(ld.sz_product_desc) LIKE '%HOME EQUITY%'
+          OR UPPER(ld.sz_portfolio_desc) LIKE '%HE%'
+          OR UPPER(ld.sz_portfolio_desc) LIKE '%HOME EQUITY%'
+          OR UPPER(ld.sz_portfolio_desc) LIKE '%HOUSING LOAN EQUITY%'
+      )
+      -- Sanction amount 3L – 2Cr
+      AND ld.f_sanctioned_amt BETWEEN 300000 AND 20000000
+      -- No restructure, no NPA
+      AND COALESCE(ld.c_restructure_yn, 'N') != 'Y'
+      AND COALESCE(ld.npa_flag, 'N') = 'N'
+      -- Current DPD < 30
+      AND COALESCE(ld.i_cur_dpd, 0) < 30
+      -- Balance tenure <= 174m; original tenor <= 180m
+      AND COALESCE(ld."balance tenure", 999) <= 174
+      AND COALESCE(ld.i_tenor, 999) <= 180
+      -- Not already funder-assigned / DA / refinanced / NHB / NABARD
+      AND ld.sz_funder_name IS NULL
+      AND ld."direct assignment" IS NULL
+      AND ld.refinance_scheme IS NULL
+      AND ld.sz_nabard_name IS NULL
+      AND ld.nhb IS NULL
+      -- CIBIL >= 675 for Individual; non-individual category exempt
+      AND (
+          UPPER(COALESCE(bor.sz_appl_category_code, '')) NOT LIKE '%I%'
+          OR TRY_CAST(bor.sz_cibil_score AS INTEGER) >= 675
+          OR TRY_CAST(bor.sz_cibil_score AS INTEGER) = -1
+          OR bor.sz_cibil_score IS NULL
       )
 ),
 
@@ -105,18 +145,34 @@ appl_ranked AS (
             WHEN apt.sz_org_name  IS NOT NULL THEN 'Non-Individual'
             ELSE NULL
         END                                                     AS cust_type,
+        -- Customer sub-type from sz_appl_category_code (better coverage than sz_salary_typ)
+        apt.sz_appl_category_code                               AS cust_subtype,
+        -- SENP/SEP classification via income_program (most populated field)
         CASE
-            WHEN UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'            THEN 'Salaried'
-            WHEN UPPER(TRIM(apt.sz_salary_typ)) IN ('SENP','SEP')  THEN 'Self-Employed'
-            ELSE apt.sz_salary_typ
-        END                                                     AS cust_subtype,
-        UPPER(TRIM(apt.sz_salary_typ))                          AS salary_typ,
+            WHEN LOWER(apt.income_program) LIKE '%salar%'             THEN 'SALARIED'
+            WHEN LOWER(apt.income_program) LIKE '%senp%'
+              OR LOWER(apt.income_program) LIKE '%sep%'
+              OR apt.income_program IN ('Self Employed - NIP-CPM', 'Self Employed - NIP')
+                                                                      THEN 'SENP'
+            WHEN UPPER(TRIM(apt.sz_salary_typ)) IN ('SENP','SEP')     THEN 'SENP'
+            WHEN apt.income_program IS NOT NULL THEN UPPER(apt.income_program)
+            ELSE NULL
+        END                                                     AS senp_sep_type,
+        -- Occupation: sz_primary_occupation is most populated; industry types as fallback
+        COALESCE(
+            NULLIF(TRIM(apt.sz_primary_occupation), ''),
+            NULLIF(TRIM(apt.ind_sz_industry_type), ''),
+            NULLIF(TRIM(apt.org_sz_industry_type), '')
+        )                                                       AS occupation,
+        -- Income assessment method
+        apt.income_type                                         AS income_type,
+        -- Constitution (for non-individual borrowers)
+        apt.sz_org_constitution                                 AS constitution,
         apt.c_gender,
         apt.dt_birth_date,
         NULLIF(TRIM(NVL(apt.sz_id2, apt.sz_panno)), '')        AS pan,
         apt.sz_cibil_score,
         apt.c_incm_consid,
-        apt.sz_primary_occupation,
         ROW_NUMBER() OVER (
             PARTITION BY apt.sz_application_no
             ORDER BY
@@ -139,8 +195,10 @@ appl_pivot AS (
         MAX(CASE WHEN seq = 1 THEN cust_type  END)             AS a1_cust_type,
         MAX(CASE WHEN seq = 1 THEN c_incm_consid END)          AS a1_is_financial,
         MAX(CASE WHEN seq = 1 THEN cust_subtype END)           AS a1_subtype,
-        MAX(CASE WHEN seq = 1 AND salary_typ IN ('SENP','SEP') THEN salary_typ END) AS a1_senp_sep,
-        MAX(CASE WHEN seq = 1 THEN sz_primary_occupation END)  AS a1_occupation,
+        MAX(CASE WHEN seq = 1 AND senp_sep_type IN ('SENP','SEP') THEN senp_sep_type END) AS a1_senp_sep,
+        MAX(CASE WHEN seq = 1 THEN occupation END)              AS a1_occupation,
+        MAX(CASE WHEN seq = 1 THEN income_type END)             AS a1_income_type,
+        MAX(CASE WHEN seq = 1 THEN constitution END)            AS a1_constitution,
         MAX(CASE WHEN seq = 1 THEN dt_birth_date END)          AS a1_dob,
         MAX(CASE WHEN seq = 1 THEN pan END)                    AS a1_pan,
         MAX(CASE WHEN seq = 1 THEN sz_cibil_score END)         AS a1_cibil,
@@ -511,8 +569,8 @@ SELECT
     -- Col 12
     ap.a1_occupation                                           AS "Occupation/Industry",
 
-    -- Col 13
-    la.constitution                                            AS "Constitution",
+    -- Col 13 (sz_org_constitution from applicant_basic_dtl_cghfl for non-individual borrowers)
+    ap.a1_constitution                                         AS "Constitution",
 
     -- Col 14
     ap.a1_dob                                                  AS "DOB/DOI \n(Primary Applicant)",
@@ -701,7 +759,7 @@ SELECT
     la.end_use_loan_description                                AS "End use as per end use letter /Sanction letter",
 
     -- Col 70
-    ap.a1_subtype                                              AS "Income Assesment method - Income /Surrogate/Assessed",
+    ap.a1_income_type                                          AS "Income Assesment method - Income /Surrogate/Assessed",
 
     -- ── Key Dates (Cols 71-75) ────────────────────────────────────────────
 
