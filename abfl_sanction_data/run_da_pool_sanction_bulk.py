@@ -67,6 +67,28 @@ THIN  = Side(style="thin")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 
+# ── Template column names (exact headers from Sancttion_Format.xlsb) ─────────
+def get_template_columns() -> list:
+    xlsb_path = ABFL_DIR / "Sancttion_Format.xlsb"
+    try:
+        from pyxlsb import open_workbook
+        with open_workbook(str(xlsb_path)) as wb:
+            with wb.get_sheet(1) as sheet:
+                rows = list(sheet.rows())
+        best_row, best_cnt = 0, 0
+        for i, row in enumerate(rows[:10]):
+            cnt = sum(1 for c in row if c.v is not None and str(c.v).strip())
+            if cnt > best_cnt:
+                best_cnt, best_row = cnt, i
+        cols = [str(c.v).strip() if c.v is not None else "" for c in rows[best_row]]
+        cols = [c for c in cols if c]
+        logger.info("Template columns read: %d from %s", len(cols), xlsb_path.name)
+        return cols
+    except Exception as exc:
+        logger.warning("Could not read template columns (%s) — using SQL names", exc)
+        return []
+
+
 # ── DB connection ──────────────────────────────────────────────────────────────
 def get_conn():
     cfg = yaml.safe_load(CFG_FILE.read_text())["database"]
@@ -104,15 +126,20 @@ def run_query() -> pd.DataFrame:
 
 
 # ── Excel writer ───────────────────────────────────────────────────────────────
-def write_excel(df: pd.DataFrame) -> None:
+def write_excel(df: pd.DataFrame, template_cols: list) -> None:
     logger.info("Writing Excel: %s", OUTPUT_PATH)
     wb = Workbook()
     ws = wb.active
     ws.title = SHEET_NAME
-    ws.freeze_panes = "C2"          # freeze row 1 + cols A-B
+    ws.freeze_panes = "C2"
+
+    n_cols = len(df.columns)
+    # Use exact template headers (avoids pandas dedup suffixes like .1, .2)
+    header_labels = (template_cols[:n_cols] if len(template_cols) >= n_cols
+                     else list(df.columns))
 
     # Header row
-    for col_idx, col_name in enumerate(df.columns, start=1):
+    for col_idx, col_name in enumerate(header_labels, start=1):
         cell = ws.cell(row=1, column=col_idx, value=col_name)
         cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
         cell.border = BORDER
@@ -128,30 +155,23 @@ def write_excel(df: pd.DataFrame) -> None:
 
     ws.row_dimensions[1].height = 60
 
-    # Data rows
+    # Data rows — positional access via .values (avoids duplicate column name issues)
     logger.info("Writing data rows …")
-    for r_idx, row in enumerate(df.itertuples(index=False), start=2):
-        for c_idx, val in enumerate(row, start=1):
+    data_values = df.values
+    for r_idx, row_data in enumerate(data_values, start=2):
+        for c_idx, val in enumerate(row_data, start=1):
             cell = ws.cell(row=r_idx, column=c_idx)
-            if isinstance(val, float) and str(val) == "nan":
-                cell.value = None
-            else:
-                cell.value = val
+            cell.value = None if (isinstance(val, float) and str(val) == "nan") else val
             cell.border = BORDER
             cell.alignment = Alignment(vertical="center")
 
     # Auto column width (cap at 40)
-    for col_idx, col_name in enumerate(df.columns, start=1):
+    for col_idx, col_name in enumerate(header_labels, start=1):
         col_data = df.iloc[:, col_idx - 1].astype(str)
         max_val  = col_data.str.len().max()
         header_w = len(str(col_name))
-        if pd.notna(max_val):
-            col_w = min(max(int(max_val), header_w, 10), 40)
-        else:
-            col_w = max(header_w, 12)
-        ws.column_dimensions[
-            ws.cell(row=1, column=col_idx).column_letter
-        ].width = col_w
+        col_w = min(max(int(max_val), header_w, 10), 40) if pd.notna(max_val) else max(header_w, 12)
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = col_w
 
     wb.save(OUTPUT_PATH)
     logger.info("Saved: %s", OUTPUT_PATH)
@@ -211,8 +231,9 @@ def main():
     logger.info("Out  : %s", OUTPUT_PATH)
     logger.info("Date : %s (POS / DPD / Rate = CURRENT_DATE live from loan_dtl)", datetime.now().date())
 
+    template_cols = get_template_columns()
     df = run_query()
-    write_excel(df)
+    write_excel(df, template_cols)
     eval_checks(df)
 
     logger.info("Done. Opening file …")

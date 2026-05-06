@@ -144,6 +144,30 @@ def get_lan_list(logger: logging.Logger) -> str:
     return "'" + "','".join(lans) + "'"
 
 
+# ── Template column names (exact headers from Sancttion_Format.xlsb) ─────────
+def get_template_columns(logger: logging.Logger) -> list[str]:
+    """Read the 132 original column headers from the .xlsb template."""
+    xlsb_path = ABFL_DIR / "Sancttion_Format.xlsb"
+    try:
+        from pyxlsb import open_workbook
+        with open_workbook(str(xlsb_path)) as wb:
+            with wb.get_sheet(1) as sheet:
+                rows = list(sheet.rows())
+        # find header row (most non-null cells)
+        best_row, best_cnt = 0, 0
+        for i, row in enumerate(rows[:10]):
+            cnt = sum(1 for c in row if c.v is not None and str(c.v).strip())
+            if cnt > best_cnt:
+                best_cnt, best_row = cnt, i
+        cols = [str(c.v).strip() if c.v is not None else "" for c in rows[best_row]]
+        cols = [c for c in cols if c]
+        logger.info("Template columns read: %d from %s", len(cols), xlsb_path.name)
+        return cols
+    except Exception as exc:
+        logger.warning("Could not read template columns (%s) — using SQL column names", exc)
+        return []
+
+
 # ── SQL parsing ──────────────────────────────────────────────────────────────
 def load_sql(lan_list: str) -> str:
     """Read the SQL file, strip trailing comment block, inject LAN list."""
@@ -168,7 +192,7 @@ def run_query(conn, sql: str, logger: logging.Logger) -> pd.DataFrame:
 
 
 # ── Excel writer ─────────────────────────────────────────────────────────────
-def write_excel(df: pd.DataFrame, logger: logging.Logger) -> None:
+def write_excel(df: pd.DataFrame, template_cols: list, logger: logging.Logger) -> None:
     logger.info("Writing output: %s", OUTPUT_PATH)
     wb = Workbook()
     ws = wb.active
@@ -177,36 +201,42 @@ def write_excel(df: pd.DataFrame, logger: logging.Logger) -> None:
     thin = Side(style="thin", color="CCCCCC")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+    # Use exact template column names if available, else fall back to SQL names
+    n_cols = len(df.columns)
+    header_labels = (template_cols[:n_cols] if len(template_cols) >= n_cols
+                     else list(df.columns))
+
     # ── header row ───────────────────────────────────────────────────────────
-    for col_idx, col_name in enumerate(df.columns, start=1):
+    for col_idx, col_name in enumerate(header_labels, start=1):
         cell = ws.cell(row=1, column=col_idx, value=col_name)
         cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
         cell.border = border
 
-        # choose highlight colour
-        if col_name in NOT_FOUND:
+        # choose highlight colour (match against both template name and NOT_FOUND/HARDCODED sets)
+        col_upper = col_name.strip()
+        if col_upper in NOT_FOUND:
             cell.fill = FILL_ORANGE
             cell.font = FONT_WHITE
-        elif col_name in HARDCODED:
+        elif col_upper in HARDCODED:
             cell.fill = FILL_BLUE
             cell.font = FONT_DARK
         else:
             cell.fill = FILL_GREEN
             cell.font = FONT_DARK
 
-    # ── data rows ────────────────────────────────────────────────────────────
-    for row_idx, row in enumerate(df.itertuples(index=False), start=2):
-        for col_idx, value in enumerate(row, start=1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+    # ── data rows (positional — avoids duplicate-column-name issues) ─────────
+    data_values = df.values  # numpy array, positional access
+    for row_idx, row_data in enumerate(data_values, start=2):
+        for col_idx, value in enumerate(row_data, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx,
+                           value=None if pd.isna(value) else value)
             cell.border = border
             cell.alignment = Alignment(vertical="center")
 
     # ── column widths ────────────────────────────────────────────────────────
-    for col_idx, col_name in enumerate(df.columns, start=1):
+    for col_idx, col_name in enumerate(header_labels, start=1):
         col_letter = get_column_letter(col_idx)
-        # header text length (first line only for wrapped headers)
         header_len = max(len(line) for line in str(col_name).splitlines())
-        # sample data max length (up to first 50 rows)
         sample = df.iloc[:50, col_idx - 1].astype(str).str.len()
         max_val = sample.max()
         data_len = int(max_val) if (len(sample) > 0 and pd.notna(max_val)) else 0
@@ -262,6 +292,7 @@ def main() -> None:
     logger.info("ABFL SANCTION FORMAT EXTRACTION  --  %s", TIMESTAMP)
     logger.info("=" * 70)
 
+    template_cols = get_template_columns(logger)
     lan_list = get_lan_list(logger)
     sql      = load_sql(lan_list)
 
@@ -289,7 +320,7 @@ def main() -> None:
         logger.error("No data returned — check LAN list and SQL.")
         sys.exit(1)
 
-    write_excel(df, logger)
+    write_excel(df, template_cols, logger)
     eval_checks(df, logger)
     logger.info("Output: %s", OUTPUT_PATH)
 
