@@ -99,37 +99,37 @@ appl_ranked AS (
             WHEN apt.sz_org_name  IS NOT NULL THEN 'Non-Individual'
             ELSE NULL
         END                                                     AS cust_type,
-        -- Customer sub-type: derive readable label (Salaried/SENP/SEP/Individual/Non-Individual)
-        -- for ALL applicants including co-applicants, using income_program + sz_salary_typ
+        -- Customer sub-type: Salaried / SEP / SENP / Individual / Non-Individual
+        -- NOTE: SEP checked BEFORE SENP/NIP to avoid 'sep - nip' being caught by %nip%
         CASE
             WHEN LOWER(apt.income_program) LIKE '%salar%'
               OR UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'               THEN 'Salaried'
+            WHEN LOWER(apt.income_program) LIKE '%sep%'
+              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SEP'               THEN 'SEP'
             WHEN LOWER(apt.income_program) LIKE '%senp%'
               OR LOWER(apt.income_program) LIKE '%nip%'
               OR LOWER(apt.income_program) LIKE '%cpm%'
               OR LOWER(apt.income_program) LIKE '%lip%'
               OR apt.income_program IN ('Self Employed - NIP-CPM', 'Self Employed - NIP')
               OR UPPER(TRIM(apt.sz_salary_typ)) = 'SENP'              THEN 'SENP'
-            WHEN LOWER(apt.income_program) LIKE '%sep%'
-              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SEP'               THEN 'SEP'
             WHEN apt.income_program IS NOT NULL                        THEN INITCAP(apt.income_program)
             WHEN apt.sz_org_name IS NOT NULL                           THEN 'Non-Individual'
             WHEN apt.person_name IS NOT NULL                           THEN 'Individual'
             ELSE NULL
         END                                                     AS cust_subtype,
-        -- SENP/SEP for col 11 (same derivation, kept separately for the dedicated column)
+        -- Col 11: In case of self employed (SENP/SEP) — NULL for Salaried
+        -- SEP checked first to prevent 'sep - nip' misclassification as SENP
         CASE
             WHEN LOWER(apt.income_program) LIKE '%salar%'
-              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'               THEN 'SALARIED'
+              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'               THEN NULL
+            WHEN LOWER(apt.income_program) LIKE '%sep%'
+              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SEP'               THEN 'SEP'
             WHEN LOWER(apt.income_program) LIKE '%senp%'
               OR LOWER(apt.income_program) LIKE '%nip%'
               OR LOWER(apt.income_program) LIKE '%cpm%'
               OR LOWER(apt.income_program) LIKE '%lip%'
               OR apt.income_program IN ('Self Employed - NIP-CPM', 'Self Employed - NIP')
               OR UPPER(TRIM(apt.sz_salary_typ)) = 'SENP'              THEN 'SENP'
-            WHEN LOWER(apt.income_program) LIKE '%sep%'
-              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SEP'               THEN 'SEP'
-            WHEN apt.income_program IS NOT NULL THEN UPPER(apt.income_program)
             ELSE NULL
         END                                                     AS senp_sep_type,
         -- Occupation: sz_primary_occupation is most populated; industry types as fallback
