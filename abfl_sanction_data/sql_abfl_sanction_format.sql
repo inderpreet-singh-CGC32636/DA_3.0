@@ -1,0 +1,972 @@
+-- ============================================================
+-- ABFL SANCTION FORMAT – Required for Pool Shortlisting
+-- Sheet: "Required for pool shortlisting"  |  132 columns
+-- Metadata-validated against ai_metadata.json + skill file
+-- Generated: 2026-05-06
+--
+-- Columns marked NULL → NOT available in DB (see summary at end)
+-- Placeholder {LAN_LIST} is replaced at runtime with quoted,
+-- comma-separated sz_loan_account_no values.
+-- ============================================================
+
+WITH
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 1: Loan + Application  (one row per LAN)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- NOTE: application_cghfl has NO sz_loan_account_no; join via sz_application_no
+loan_app AS (
+    SELECT
+        ld.sz_loan_account_no,
+        ld.sz_application_no,
+        ld.sz_customer_no,
+        ld.f_sanctioned_amt,
+        ld.i_tenor,
+        ld."balance tenure",
+        ld."current total tenure",
+        ld.c_interest_rate_type,
+        ld.f_curr_interestrate,
+        ld."principal outstanding",
+        ld."overdue principal",
+        ld."cumulative amount disbursed",
+        ld.c_final_disb_yn,
+        ld.installment_start_date,
+        ld."first disbursement date",
+        ld."latest disbursement date",
+        ld.sz_delinquency_str,
+        ld.i_cur_dpd,
+        ld.c_psl,
+        ld.c_staff_loan_yn,
+        ld."pmay - clss",
+        ld.c_restructure_yn,
+        ld.npa_flag,
+        ld.sz_risk_grade                                        AS ld_risk_grade,
+        ld.sz_repayment_mode,
+        ld.f_ltv_per,
+        ld.f_adv_amt,
+        ld.installment_amount,
+        app.branch,
+        app.region,
+        app.end_use_loan_description,
+        app.sanction_date,
+        app.sanction_amount,
+        app.foir_wo_insurance,
+        app.total_eligible_income,
+        app.cibil_score                                         AS app_cibil_score,
+        app.sz_risk_grade                                       AS app_risk_grade,
+        app.loan_purpose_description,
+        -- constitution lives in disbursement_cghfl_v2, not in application/loan tables
+        disb_c.constitution
+    FROM analytics_reporting.loan_dtl_cghfl ld
+    JOIN analytics_reporting.application_cghfl app
+        ON app.sz_application_no = ld.sz_application_no
+    LEFT JOIN (
+        SELECT sz_loan_account_no, constitution
+        FROM (
+            SELECT sz_loan_account_no, constitution,
+                   ROW_NUMBER() OVER (PARTITION BY sz_loan_account_no ORDER BY i_tranch_srno) AS rk
+            FROM analytics_reporting.disbursement_cghfl_v2
+            WHERE sz_loan_account_no IN ({LAN_LIST})
+        ) t WHERE rk = 1
+    ) disb_c ON disb_c.sz_loan_account_no = ld.sz_loan_account_no
+    WHERE ld.sz_loan_account_no IN ({LAN_LIST})
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 2: Applicants ranked (Borrower first, then co-borrowers by i_applicant_id)
+-- ─────────────────────────────────────────────────────────────────────────────
+appl_ranked AS (
+    SELECT
+        apt.sz_application_no,
+        apt.i_applicant_id,
+        apt.sz_appl_type_code,
+        apt.sz_relation_to_main_applicant,
+        NVL(apt.person_name, apt.sz_org_name)                  AS cust_name,
+        CASE
+            WHEN apt.person_name IS NOT NULL THEN 'Individual'
+            WHEN apt.sz_org_name  IS NOT NULL THEN 'Non-Individual'
+            ELSE NULL
+        END                                                     AS cust_type,
+        CASE
+            WHEN UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'            THEN 'Salaried'
+            WHEN UPPER(TRIM(apt.sz_salary_typ)) IN ('SENP','SEP')  THEN 'Self-Employed'
+            ELSE apt.sz_salary_typ
+        END                                                     AS cust_subtype,
+        UPPER(TRIM(apt.sz_salary_typ))                          AS salary_typ,
+        apt.c_gender,
+        apt.dt_birth_date,
+        NULLIF(TRIM(NVL(apt.sz_id2, apt.sz_panno)), '')        AS pan,
+        apt.sz_cibil_score,
+        apt.c_incm_consid,
+        apt.sz_primary_occupation,
+        ROW_NUMBER() OVER (
+            PARTITION BY apt.sz_application_no
+            ORDER BY
+                CASE WHEN apt.sz_appl_type_code = 'BORROWER' THEN 0 ELSE 1 END,
+                apt.i_applicant_id
+        )                                                       AS seq
+    FROM analytics_reporting.applicant_basic_dtl_cghfl apt
+    WHERE apt.sz_application_no IN (
+        SELECT sz_application_no
+        FROM analytics_reporting.loan_dtl_cghfl
+        WHERE sz_loan_account_no IN ({LAN_LIST})
+    )
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 3: Pre-pivot applicants 1-9 into columns (one row per application)
+-- ─────────────────────────────────────────────────────────────────────────────
+appl_pivot AS (
+    SELECT
+        sz_application_no,
+        -- Applicant 1 (primary borrower)
+        MAX(CASE WHEN seq = 1 THEN cust_name  END)             AS a1_name,
+        MAX(CASE WHEN seq = 1 THEN c_gender   END)             AS a1_gender,
+        MAX(CASE WHEN seq = 1 THEN cust_type  END)             AS a1_cust_type,
+        MAX(CASE WHEN seq = 1 THEN c_incm_consid END)          AS a1_is_financial,
+        MAX(CASE WHEN seq = 1 THEN cust_subtype END)           AS a1_subtype,
+        MAX(CASE WHEN seq = 1 AND salary_typ IN ('SENP','SEP') THEN salary_typ END) AS a1_senp_sep,
+        MAX(CASE WHEN seq = 1 THEN sz_primary_occupation END)  AS a1_occupation,
+        MAX(CASE WHEN seq = 1 THEN dt_birth_date END)          AS a1_dob,
+        MAX(CASE WHEN seq = 1 THEN pan END)                    AS a1_pan,
+        MAX(CASE WHEN seq = 1 THEN sz_cibil_score END)         AS a1_cibil,
+        -- Applicant 2
+        MAX(CASE WHEN seq = 2 THEN cust_name  END)             AS a2_name,
+        MAX(CASE WHEN seq = 2 THEN cust_type  END)             AS a2_cust_type,
+        MAX(CASE WHEN seq = 2 THEN cust_subtype END)           AS a2_subtype,
+        MAX(CASE WHEN seq = 2 THEN dt_birth_date END)          AS a2_dob,
+        MAX(CASE WHEN seq = 2 THEN pan END)                    AS a2_pan,
+        MAX(CASE WHEN seq = 2 THEN sz_relation_to_main_applicant END) AS a2_relation,
+        -- Applicant 3
+        MAX(CASE WHEN seq = 3 THEN cust_name  END)             AS a3_name,
+        MAX(CASE WHEN seq = 3 THEN cust_type  END)             AS a3_cust_type,
+        MAX(CASE WHEN seq = 3 THEN cust_subtype END)           AS a3_subtype,
+        MAX(CASE WHEN seq = 3 THEN dt_birth_date END)          AS a3_dob,
+        MAX(CASE WHEN seq = 3 THEN pan END)                    AS a3_pan,
+        MAX(CASE WHEN seq = 3 THEN sz_relation_to_main_applicant END) AS a3_relation,
+        -- Applicant 4
+        MAX(CASE WHEN seq = 4 THEN cust_name  END)             AS a4_name,
+        MAX(CASE WHEN seq = 4 THEN cust_type  END)             AS a4_cust_type,
+        MAX(CASE WHEN seq = 4 THEN cust_subtype END)           AS a4_subtype,
+        MAX(CASE WHEN seq = 4 THEN dt_birth_date END)          AS a4_dob,
+        MAX(CASE WHEN seq = 4 THEN pan END)                    AS a4_pan,
+        MAX(CASE WHEN seq = 4 THEN sz_relation_to_main_applicant END) AS a4_relation,
+        -- Applicant 5
+        MAX(CASE WHEN seq = 5 THEN cust_name  END)             AS a5_name,
+        MAX(CASE WHEN seq = 5 THEN cust_type  END)             AS a5_cust_type,
+        MAX(CASE WHEN seq = 5 THEN cust_subtype END)           AS a5_subtype,
+        MAX(CASE WHEN seq = 5 THEN dt_birth_date END)          AS a5_dob,
+        MAX(CASE WHEN seq = 5 THEN pan END)                    AS a5_pan,
+        MAX(CASE WHEN seq = 5 THEN sz_relation_to_main_applicant END) AS a5_relation,
+        -- Applicant 6
+        MAX(CASE WHEN seq = 6 THEN cust_name  END)             AS a6_name,
+        MAX(CASE WHEN seq = 6 THEN cust_type  END)             AS a6_cust_type,
+        MAX(CASE WHEN seq = 6 THEN cust_subtype END)           AS a6_subtype,
+        MAX(CASE WHEN seq = 6 THEN dt_birth_date END)          AS a6_dob,
+        MAX(CASE WHEN seq = 6 THEN pan END)                    AS a6_pan,
+        MAX(CASE WHEN seq = 6 THEN sz_relation_to_main_applicant END) AS a6_relation,
+        -- Applicant 7
+        MAX(CASE WHEN seq = 7 THEN cust_name  END)             AS a7_name,
+        MAX(CASE WHEN seq = 7 THEN cust_type  END)             AS a7_cust_type,
+        MAX(CASE WHEN seq = 7 THEN cust_subtype END)           AS a7_subtype,
+        MAX(CASE WHEN seq = 7 THEN dt_birth_date END)          AS a7_dob,
+        MAX(CASE WHEN seq = 7 THEN pan END)                    AS a7_pan,
+        MAX(CASE WHEN seq = 7 THEN sz_relation_to_main_applicant END) AS a7_relation,
+        -- Applicant 8
+        MAX(CASE WHEN seq = 8 THEN cust_name  END)             AS a8_name,
+        MAX(CASE WHEN seq = 8 THEN cust_type  END)             AS a8_cust_type,
+        MAX(CASE WHEN seq = 8 THEN cust_subtype END)           AS a8_subtype,
+        MAX(CASE WHEN seq = 8 THEN dt_birth_date END)          AS a8_dob,
+        MAX(CASE WHEN seq = 8 THEN pan END)                    AS a8_pan,
+        MAX(CASE WHEN seq = 8 THEN sz_relation_to_main_applicant END) AS a8_relation,
+        -- Applicant 9
+        MAX(CASE WHEN seq = 9 THEN cust_name  END)             AS a9_name,
+        MAX(CASE WHEN seq = 9 THEN cust_type  END)             AS a9_cust_type,
+        MAX(CASE WHEN seq = 9 THEN cust_subtype END)           AS a9_subtype,
+        MAX(CASE WHEN seq = 9 THEN dt_birth_date END)          AS a9_dob,
+        MAX(CASE WHEN seq = 9 THEN pan END)                    AS a9_pan,
+        MAX(CASE WHEN seq = 9 THEN sz_relation_to_main_applicant END) AS a9_relation
+    FROM appl_ranked
+    GROUP BY sz_application_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 4: Primary borrower current address  (one row per LAN)
+-- ─────────────────────────────────────────────────────────────────────────────
+borrow_addr AS (
+    SELECT *
+    FROM (
+        SELECT
+            ld.sz_loan_account_no,
+            TRIM(
+                COALESCE(adr.current_sz_address_1, '') || ' ' ||
+                COALESCE(adr.current_sz_address_2, '') || ' ' ||
+                COALESCE(adr.current_sz_address_3, '')
+            )                                                   AS customer_address,
+            adr.current_city,
+            adr.current_state,
+            adr.current_sz_postal_code,
+            ROW_NUMBER() OVER (
+                PARTITION BY ld.sz_loan_account_no
+                ORDER BY adr.i_applicant_id
+            )                                                   AS rk
+        FROM analytics_reporting.applicant_address_contact_dtl_cghfl adr
+        JOIN analytics_reporting.applicant_basic_dtl_cghfl apt
+            ON  apt.sz_application_no = adr.sz_application_no
+            AND apt.i_applicant_id    = adr.i_applicant_id
+            AND apt.sz_appl_type_code = 'BORROWER'
+        JOIN analytics_reporting.loan_dtl_cghfl ld
+            ON ld.sz_application_no = adr.sz_application_no
+        WHERE ld.sz_loan_account_no IN ({LAN_LIST})
+    ) t WHERE rk = 1
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 5: Top-valued asset / collateral  (one row per application)
+-- ─────────────────────────────────────────────────────────────────────────────
+asset_top AS (
+    SELECT *
+    FROM (
+        SELECT
+            ast.sz_application_no,
+            ast.i_asset_srno,
+            ast.sz_description                                  AS collateral_desc,
+            ast.property_type,
+            ast.a_sz_prop_usage                                 AS collateral_use,
+            COALESCE(ast.is_under_construction, 'N')            AS is_under_construction,
+            CASE
+                WHEN UPPER(TRIM(ast.property_type)) LIKE '%PLOT%'
+                  OR UPPER(TRIM(ast.sz_subtype))    LIKE '%PLOT%'
+                THEN 'Y' ELSE 'N'
+            END                                                 AS open_plot_flag,
+            ast.a_i_tot_valuation                               AS collateral_value,
+            TRIM(
+                COALESCE(ast.sz_address_1, '') || ' ' ||
+                COALESCE(ast.sz_address_2, '') || ' ' ||
+                COALESCE(ast.sz_address_3, '')
+            )                                                   AS property_address,
+            ast.city                                            AS property_city,
+            ast.state                                           AS property_state,
+            ast.sz_postal_code                                  AS property_pincode,
+            ast.property_owner_name,
+            ast.sz_cersai_sec_int_id,
+            ast.dt_cersai,
+            ROW_NUMBER() OVER (
+                PARTITION BY ast.sz_application_no
+                ORDER BY ast.a_i_tot_valuation DESC NULLS LAST
+            )                                                   AS rk
+        FROM analytics_reporting.asset_cghfl ast
+        WHERE ast.sz_application_no IN (
+            SELECT sz_application_no
+            FROM analytics_reporting.loan_dtl_cghfl
+            WHERE sz_loan_account_no IN ({LAN_LIST})
+        )
+    ) t WHERE rk = 1
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 6: Latest loan_status_monthly snapshot  (one row per LAN)
+-- ─────────────────────────────────────────────────────────────────────────────
+lsm_latest AS (
+    SELECT *
+    FROM (
+        SELECT
+            sz_loan_account_no,
+            total_principal_outstanding,
+            f_overdue_principal,
+            i_no_of_overdue_emi,
+            i_dpd                                               AS lsm_dpd,
+            ROW_NUMBER() OVER (
+                PARTITION BY sz_loan_account_no
+                ORDER BY dt_businessdate DESC
+            )                                                   AS rk
+        FROM analytics_reporting.loan_status_monthly_cghfl
+        WHERE sz_loan_account_no IN ({LAN_LIST})
+    ) t WHERE rk = 1
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 7: DPD string – last 12 months  (LISTAGG of monthly DPD values)
+-- Format: "000-000-030-000-..." one value per month, latest first
+-- ─────────────────────────────────────────────────────────────────────────────
+dpd_last12 AS (
+    SELECT
+        sz_loan_account_no,
+        LISTAGG(
+            LPAD(CAST(COALESCE(i_dpd, 0) AS VARCHAR), 3, '0'),
+            '-'
+        ) WITHIN GROUP (ORDER BY dt_businessdate DESC)         AS dpd_str_12m
+    FROM (
+        SELECT
+            sz_loan_account_no,
+            dt_businessdate,
+            i_dpd,
+            ROW_NUMBER() OVER (
+                PARTITION BY sz_loan_account_no
+                ORDER BY dt_businessdate DESC
+            )                                                   AS rk
+        FROM analytics_reporting.loan_status_monthly_cghfl
+        WHERE sz_loan_account_no IN ({LAN_LIST})
+          AND dt_businessdate >= ADD_MONTHS(CURRENT_DATE, -12)
+    ) t
+    WHERE rk <= 12
+    GROUP BY sz_loan_account_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 8: Max ever DPD (across all monthly snapshots)
+-- ─────────────────────────────────────────────────────────────────────────────
+dpd_max AS (
+    SELECT
+        sz_loan_account_no,
+        MAX(COALESCE(i_dpd, 0))                                AS max_ever_dpd
+    FROM analytics_reporting.loan_status_monthly_cghfl
+    WHERE sz_loan_account_no IN ({LAN_LIST})
+    GROUP BY sz_loan_account_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 9: Pre-EMI / advance instalment info  (from disbursement table)
+-- ─────────────────────────────────────────────────────────────────────────────
+advance_info AS (
+    SELECT
+        sz_loan_account_no,
+        SUM(COALESCE(pre_emi_amt, 0))                          AS total_advance_amt,
+        COUNT(CASE WHEN COALESCE(pre_emi_amt, 0) > 0 THEN 1 END) AS no_advance_installments
+    FROM analytics_reporting.disbursement_cghfl_v2
+    WHERE sz_loan_account_no IN ({LAN_LIST})
+    GROUP BY sz_loan_account_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 10: Next EMI due date  (first future date in repayment schedule)
+-- ─────────────────────────────────────────────────────────────────────────────
+next_due AS (
+    SELECT
+        sz_loan_account_no,
+        MIN(dt_installmentdue)                                 AS next_emi_due_date
+    FROM analytics_reporting.repayment_schedule_cghfl
+    WHERE sz_loan_account_no IN ({LAN_LIST})
+      AND dt_installmentdue >= CURRENT_DATE
+    GROUP BY sz_loan_account_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 11: Bounce string – last 12 months  (from CBR table)
+-- Source: external_curated.NB_CBR_CGHFL_FINAL_NEW
+-- bounce_status_3_day = 'CLEAR' or 'BOUNCE'  (one row per EMI month)
+-- Format: "B-C-C-B-C-..." latest month first, 'B'=BOUNCE, 'C'=CLEAR
+-- ─────────────────────────────────────────────────────────────────────────────
+bounce_last12 AS (
+    SELECT
+        sz_loan_account_no,
+        LISTAGG(
+            CASE WHEN bounce_status_3_day = 'BOUNCE' THEN 'B' ELSE 'C' END,
+            '-'
+        ) WITHIN GROUP (ORDER BY dt_installmentdue DESC)       AS bounce_str_12m
+    FROM (
+        SELECT
+            sz_loan_account_no,
+            dt_installmentdue,
+            bounce_status_3_day,
+            ROW_NUMBER() OVER (
+                PARTITION BY sz_loan_account_no
+                ORDER BY dt_installmentdue DESC
+            )                                                  AS rk
+        FROM external_curated.nb_cbr_cghfl_final_new
+        WHERE sz_loan_account_no IN ({LAN_LIST})
+          AND dt_installmentdue >= ADD_MONTHS(CURRENT_DATE, -12)
+          AND i_installment_no IS NOT NULL
+    ) t
+    WHERE rk <= 12
+    GROUP BY sz_loan_account_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 12: Bounce string – since inception  (all EMI months from CBR)
+-- ─────────────────────────────────────────────────────────────────────────────
+bounce_inception AS (
+    SELECT
+        sz_loan_account_no,
+        LISTAGG(
+            CASE WHEN bounce_status_3_day = 'BOUNCE' THEN 'B' ELSE 'C' END,
+            '-'
+        ) WITHIN GROUP (ORDER BY dt_installmentdue DESC)       AS bounce_str_all
+    FROM external_curated.nb_cbr_cghfl_final_new
+    WHERE sz_loan_account_no IN ({LAN_LIST})
+      AND i_installment_no IS NOT NULL
+    GROUP BY sz_loan_account_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 8b: Max ever DPD from lms_provision_dtls_cghfl (daily; covers LSM gaps)
+-- ─────────────────────────────────────────────────────────────────────────────
+prov_max_dpd AS (
+    SELECT
+        sz_loan_account_no,
+        MAX(COALESCE(i_dpd, 0))                                AS max_ever_dpd_prov
+    FROM analytics_reporting.lms_provision_dtls_cghfl
+    WHERE sz_loan_account_no IN ({LAN_LIST})
+    GROUP BY sz_loan_account_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 13: PDD status  (from otc_pdd_table_cghfl)
+-- Join key: loan_acc_no (NOT sz_loan_account_no)
+-- otc_pdd = 'PDD' → post-disbursement document
+-- otc_pdd = 'OTC' → one-time collection document
+-- doc_receivd_flag = 'YES' → received;  'NO' → pending
+-- PDD complete = 'Y' when all critical PDD docs are received
+-- ─────────────────────────────────────────────────────────────────────────────
+pdd_status AS (
+    SELECT
+        loan_acc_no                                            AS sz_loan_account_no,
+        CASE
+            WHEN SUM(CASE
+                    WHEN UPPER(otc_pdd) = 'PDD'
+                     AND UPPER(TRIM(critical)) ILIKE '%critical%'
+                     AND UPPER(TRIM(doc_receivd_flag)) != 'YES'
+                    THEN 1 ELSE 0
+                 END) = 0
+            THEN 'Y'
+            ELSE 'N'
+        END                                                    AS pdd_complete,
+        LISTAGG(
+            CASE
+                WHEN UPPER(otc_pdd) = 'PDD'
+                 AND UPPER(TRIM(critical)) ILIKE '%critical%'
+                 AND UPPER(TRIM(doc_receivd_flag)) != 'YES'
+                THEN COALESCE(NULLIF(TRIM(document_name),''), NULLIF(TRIM(document_desc),''), 'Unknown Doc')
+                ELSE NULL
+            END,
+            '; '
+        ) WITHIN GROUP (ORDER BY document_name)               AS pdd_pending_docs
+    FROM analytics_reporting.otc_pdd_table_cghfl
+    WHERE loan_acc_no IN ({LAN_LIST})
+      AND is_deleted IS DISTINCT FROM TRUE
+    GROUP BY loan_acc_no
+)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- MAIN SELECT  –  132 columns in template order
+-- ─────────────────────────────────────────────────────────────────────────────
+SELECT
+    -- Col 1
+    ROW_NUMBER() OVER (ORDER BY la.sz_loan_account_no)         AS "Sl. No.",
+
+    -- Col 2
+    la.sz_loan_account_no                                      AS "Loan No.",
+
+    -- Col 3
+    la.sz_customer_no                                          AS "Unique Cutomer ID No. ",
+
+    -- Col 4  (branch stored in application_cghfl.branch)
+    la.branch                                                  AS "Branch Name/State",
+
+    -- Col 5  (region used as state hierarchy)
+    la.region                                                  AS "State",
+
+    -- ── Primary Applicant (Cols 6-19) ─────────────────────────────────────
+
+    -- Col 6
+    ap.a1_name                                                 AS "Customer Name (Primary Applicant)",
+
+    -- Col 7  (c_gender: M/F/O)
+    ap.a1_gender                                               AS "Gender for Primary Applicant",
+
+    -- Col 8  (Individual vs Non-Individual, derived from person_name vs sz_org_name)
+    ap.a1_cust_type                                            AS "Customer Type (Primary Applicant)",
+
+    -- Col 9  (c_incm_consid = Y → income was considered for eligibility)
+    ap.a1_is_financial                                         AS "is primary applicant a financial applicant",
+
+    -- Col 10 (SAL=Salaried, SENP/SEP=Self-Employed, derived from sz_salary_typ)
+    ap.a1_subtype                                              AS "Customer Sub-type (Primary Applicant)",
+
+    -- Col 11 (populated only when SENP or SEP)
+    ap.a1_senp_sep                                             AS "In case of self employed (SENP/ SEP)",
+
+    -- Col 12
+    ap.a1_occupation                                           AS "Occupation/Industry",
+
+    -- Col 13 (constitution from application_cghfl)
+    la.constitution                                            AS "Constitution",
+
+    -- Col 14
+    ap.a1_dob                                                  AS "DOB/DOI \n(Primary Applicant)",
+
+    -- Col 15 (current address from applicant_address_contact_dtl_cghfl)
+    ba.customer_address                                        AS "Customer Address",
+
+    -- Col 16
+    ba.current_city                                            AS "City",
+
+    -- Col 17
+    ba.current_state                                           AS "State.1",
+
+    -- Col 18
+    ba.current_sz_postal_code                                  AS "Zip code",
+
+    -- Col 19 (PAN: NVL(sz_id2, sz_panno) – high-rank extraction pattern)
+    ap.a1_pan                                                  AS "Pan Number",
+
+    -- ── Applicant 2 (Cols 20-25) ──────────────────────────────────────────
+
+    -- Col 20
+    ap.a2_name                                                 AS "Customer Name (Applicant  2)",
+
+    -- Col 21
+    ap.a2_cust_type                                            AS "Customer Type (Applicant 2)",
+
+    -- Col 22
+    ap.a2_subtype                                              AS "Customer Sub-type (Applicant 2)",
+
+    -- Col 23
+    ap.a2_dob                                                  AS "DOB/DOI (Applicant 2)",
+
+    -- Col 24
+    ap.a2_pan                                                  AS "PAN Number",
+
+    -- Col 25
+    ap.a2_relation                                             AS "Relation with Primary Applicant",
+
+    -- ── Applicant 3 (Cols 26-31) ──────────────────────────────────────────
+
+    -- Col 26
+    ap.a3_name                                                 AS "Customer Name (Applicant  3)",
+
+    -- Col 27
+    ap.a3_cust_type                                            AS "Customer Type (Applicant 3)",
+
+    -- Col 28
+    ap.a3_subtype                                              AS "Customer Sub-type (Applicant 3)",
+
+    -- Col 29
+    ap.a3_dob                                                  AS "DOB/DOI (Applicant 3)",
+
+    -- Col 30
+    ap.a3_pan                                                  AS "PAN Number.1",
+
+    -- Col 31
+    ap.a3_relation                                             AS "Relation with Primary Applicant.1",
+
+    -- ── Applicant 4 (Cols 32-37) ──────────────────────────────────────────
+
+    -- Col 32
+    ap.a4_name                                                 AS "Customer Name (Applicant  4)",
+
+    -- Col 33
+    ap.a4_cust_type                                            AS "Customer Type (Applicant 4)",
+
+    -- Col 34
+    ap.a4_subtype                                              AS "Customer Sub-type (Applicant 4)",
+
+    -- Col 35
+    ap.a4_dob                                                  AS "DOB/DOI (Applicant 4)",
+
+    -- Col 36
+    ap.a4_pan                                                  AS "PAN Number.2",
+
+    -- Col 37
+    ap.a4_relation                                             AS "Relation with Primary Applicant.2",
+
+    -- ── Applicant 5 (Cols 38-43) ──────────────────────────────────────────
+
+    -- Col 38
+    ap.a5_name                                                 AS "Customer Name (Applicant  5)",
+
+    -- Col 39
+    ap.a5_cust_type                                            AS "Customer Type (Applicant 5)",
+
+    -- Col 40
+    ap.a5_subtype                                              AS "Customer Sub-type (Applicant 5)",
+
+    -- Col 41
+    ap.a5_dob                                                  AS "DOB/DOI (Applicant 5)",
+
+    -- Col 42
+    ap.a5_pan                                                  AS "PAN Number.3",
+
+    -- Col 43
+    ap.a5_relation                                             AS "Relation with Primary Applicant.3",
+
+    -- ── Applicant 6 (Cols 44-49) ──────────────────────────────────────────
+
+    -- Col 44
+    ap.a6_name                                                 AS "Customer Name (Applicant  6)",
+
+    -- Col 45
+    ap.a6_cust_type                                            AS "Customer Type (Applicant 6)",
+
+    -- Col 46
+    ap.a6_subtype                                              AS "Customer Sub-type (Applicant 6)",
+
+    -- Col 47
+    ap.a6_dob                                                  AS "DOB/DOI (Applicant 6)",
+
+    -- Col 48
+    ap.a6_pan                                                  AS "PAN Number.4",
+
+    -- Col 49
+    ap.a6_relation                                             AS "Relation with Primary Applicant.4",
+
+    -- ── Applicant 7 (Cols 50-55) ──────────────────────────────────────────
+
+    -- Col 50
+    ap.a7_name                                                 AS "Customer Name (Applicant  7)",
+
+    -- Col 51
+    ap.a7_cust_type                                            AS "Customer Type (Applicant 7)",
+
+    -- Col 52
+    ap.a7_subtype                                              AS "Customer Sub-type (Applicant 7)",
+
+    -- Col 53
+    ap.a7_dob                                                  AS "DOB/DOI (Applicant 7)",
+
+    -- Col 54
+    ap.a7_pan                                                  AS "PAN Number.5",
+
+    -- Col 55
+    ap.a7_relation                                             AS "Relation with Primary Applicant.5",
+
+    -- ── Applicant 8 (Cols 56-61) ──────────────────────────────────────────
+
+    -- Col 56
+    ap.a8_name                                                 AS "Customer Name (Applicant  8)",
+
+    -- Col 57
+    ap.a8_cust_type                                            AS "Customer Type (Applicant 8)",
+
+    -- Col 58
+    ap.a8_subtype                                              AS "Customer Sub-type (Applicant 8)",
+
+    -- Col 59
+    ap.a8_dob                                                  AS "DOB/DOI (Applicant 8)",
+
+    -- Col 60
+    ap.a8_pan                                                  AS "PAN Number.6",
+
+    -- Col 61
+    ap.a8_relation                                             AS "Relation with Primary Applicant.6",
+
+    -- ── Applicant 9 (Cols 62-67) ──────────────────────────────────────────
+
+    -- Col 62
+    ap.a9_name                                                 AS "Customer Name (Applicant  9)",
+
+    -- Col 63
+    ap.a9_cust_type                                            AS "Customer Type (Applicant 9)",
+
+    -- Col 64
+    ap.a9_subtype                                              AS "Customer Sub-type (Applicant 9)",
+
+    -- Col 65
+    ap.a9_dob                                                  AS "DOB/DOI (Applicant 9)",
+
+    -- Col 66
+    ap.a9_pan                                                  AS "PAN Number.7",
+
+    -- Col 67
+    ap.a9_relation                                             AS "Relation with Primary Applicant.7",
+
+    -- ── Risk & Classification (Cols 68-70) ───────────────────────────────
+
+    -- Col 68  (sz_risk_grade in both loan_dtl and application; prefer loan_dtl)
+    COALESCE(la.ld_risk_grade, la.app_risk_grade)              AS "Risk Categorization",
+
+    -- Col 69
+    la.end_use_loan_description                                AS "End use as per end use letter /Sanction letter",
+
+    -- Col 70  (income program type, derived from sz_salary_typ of primary borrower)
+    ap.a1_subtype                                              AS "Income Assesment method - Income /Surrogate/Assessed",
+
+    -- ── Key Dates (Cols 71-75) ────────────────────────────────────────────
+
+    -- Col 71  (sanction_date from application_cghfl)
+    la.sanction_date                                           AS "Sanctioned date",
+
+    -- Col 72  (first disbursement date – column has spaces, must quote)
+    la."first disbursement date"                               AS "Agreement date/First Disbursement Date",
+
+    -- Col 73  (latest disbursement date – column has spaces, must quote)
+    la."latest disbursement date"                              AS "Last Disbursement Date",
+
+    -- Col 74
+    CASE WHEN UPPER(la.c_final_disb_yn) = 'Y' THEN 'Yes' ELSE 'No' END
+                                                               AS "fully disbursed Yes/No",
+
+    -- Col 75
+    la.installment_start_date                                  AS "First instalment date",
+
+    -- ── Loan Amounts & Tenure (Cols 76-79) ───────────────────────────────
+
+    -- Col 76  (sanction_amount from application; fallback to f_sanctioned_amt from loan_dtl)
+    COALESCE(la.sanction_amount, la.f_sanctioned_amt)          AS "Sanctioned Amount - as of now Sanction+Ins Provided",
+
+    -- Col 77  (cumulative amount disbursed – column has spaces)
+    la."cumulative amount disbursed"                           AS "disbursed amount",
+
+    -- Col 78  (original sanctioned tenure in months)
+    la.i_tenor                                                 AS "Sanctioned Tenure (Months)",
+
+    -- Col 79  (remaining tenure – column has spaces)
+    la."balance tenure"                                        AS "Balance Tenure (Months)",
+
+    -- ── Rate & Outstanding (Cols 80-84) ──────────────────────────────────
+
+    -- Col 80  (c_interest_rate_type: F=Fixed, V=Variable/Floating)
+    la.c_interest_rate_type                                    AS "Rate Type",
+
+    -- Col 81  (current live interest rate)
+    la.f_curr_interestrate                                     AS "Current ROI",
+
+    -- Col 82  (live principal outstanding – column has spaces)
+    la."principal outstanding"                                 AS "Principal O/s",
+
+    -- Col 83  (overdue principal from loan_dtl; monthly snapshot in lsm)
+    COALESCE(la."overdue principal", lsm.f_overdue_principal)  AS "Overdue Amt - Principal",
+
+    -- Col 84  (overdue instalment count from latest monthly snapshot)
+    lsm.i_no_of_overdue_emi                                    AS "Overdue Installments",
+
+    -- ── Advance / EMI (Cols 85-89) ────────────────────────────────────────
+
+    -- Col 85  (pre-EMI advance amount – from disbursement; fallback f_adv_amt from loan_dtl)
+    COALESCE(adv.total_advance_amt, la.f_adv_amt)              AS "Advance Amt (if any)",
+
+    -- Col 86  (count of advance instalments from disbursement_cghfl_v2)
+    adv.no_advance_installments                                AS "Advance Installments (if any)",
+
+    -- Col 87  (all HE loans are monthly EMI)
+    'Monthly'                                                  AS "EMI Frequency",
+
+    -- Col 88  (first upcoming due date from repayment_schedule_cghfl)
+    nd.next_emi_due_date                                       AS "EMI due date",
+
+    -- Col 89  (installment_amount is VARCHAR in loan_dtl – safe cast)
+    TRY_CAST(la.installment_amount AS DECIMAL(18, 2))          AS "Current EMI ",
+
+    -- ── Asset / Collateral (Cols 90-103) ─────────────────────────────────
+
+    -- Col 90
+    ast.i_asset_srno                                           AS "asset id/ Property ID",
+
+    -- Col 91  (derived: live POS / collateral value × 100)
+    CASE
+        WHEN COALESCE(ast.collateral_value, 0) > 0
+        THEN ROUND(
+            la."principal outstanding" / NULLIF(ast.collateral_value, 0) * 100,
+            2)
+        ELSE NULL
+    END                                                        AS "Current LTV at asset level",
+
+    -- Col 92  (f_ltv_per from loan_dtl = LTV at time of sanction)
+    la.f_ltv_per                                               AS "LTV (%) at collateral level at the time of original sanction ",
+
+    -- Col 93
+    ast.collateral_desc                                        AS "Collateral Description",
+
+    -- Col 94
+    ast.property_type                                          AS "Property type ",
+
+    -- Col 95  (a_sz_prop_usage from asset_cghfl: Residential / Commercial etc.)
+    ast.collateral_use                                         AS "Collateral use",
+
+    -- Col 96  (is_under_construction from asset_cghfl; defaulted to 'N' if NULL)
+    ast.is_under_construction                                  AS "Under construction flag (Y/N)",
+
+    -- Col 97  (derived from property_type / sz_subtype containing 'PLOT')
+    ast.open_plot_flag                                         AS "Open Plot (Y/N)",
+
+    -- Col 98
+    ast.collateral_value                                       AS "Collateral  value",
+
+    -- Col 99  (same as collateral value – a_i_tot_valuation is the tech valuation)
+    ast.collateral_value                                       AS "Valuation amount",
+
+    -- Col 100 (concatenated address from asset_cghfl sz_address_1/2/3)
+    ast.property_address                                       AS "Address of the Property",
+
+    -- Col 101
+    ast.property_city                                          AS "Property City",
+
+    -- Col 102
+    ast.property_state                                         AS "Property State",
+
+    -- Col 103
+    ast.property_pincode                                       AS "Pincode of property location",
+
+    -- Col 104 (property_owner_name from asset_cghfl)
+    ast.property_owner_name                                    AS "Name of registed property owner",
+
+    -- ── Repayment & Bureau (Cols 105-107) ────────────────────────────────
+
+    -- Col 105
+    la.sz_repayment_mode                                       AS "Repayment mode",
+
+    -- Col 106  (cibil_score from application_cghfl = bureau score at origination)
+    la.app_cibil_score                                         AS "Originated cibil score( for all apllicants)",
+
+    -- Col 107  (same table – separate "current" bureau pull not available in DB;
+    --            ap.a1_cibil from applicant_basic_dtl_cghfl is an alternative)
+    COALESCE(ap.a1_cibil, la.app_cibil_score)                 AS "Current CIBIL score( for all applicants)",
+
+    -- ── PDD (Cols 108-109) from otc_pdd_table_cghfl ─────────────────────
+
+    -- Col 108  (Y = all critical PDD docs received / no PDD docs pending)
+    COALESCE(pdd.pdd_complete, 'Y')                            AS "PDD status complete (Y/N)",
+
+    -- Col 109  (semicolon-separated critical PDD docs not yet received)
+    NULLIF(pdd.pdd_pending_docs, '')                           AS "PDD status, if pending (Mention any critical docs)",
+
+    -- ── Scheme & Social Flags (Cols 110-118) ─────────────────────────────
+
+    -- Col 110  [CANNOT FIND – no subvention scheme flag in current tables]
+    NULL                                                       AS "Subvention Scheme if any",
+
+    -- Col 111  (all HE cases per template note; pmay-clss column exists in loan_dtl
+    --           but template says always 'N' for HE pool)
+    'N'                                                        AS "PMAY Flag (Y/N) - All are HE cases thus marked as No",
+
+    -- Col 112  [CANNOT FIND – PMAY subsidy status not in DB]
+    NULL                                                       AS "PMAY subsidy status \n(Claimed & received/ Claimed & not received / Not claimed/Claimed but rejected)",
+
+    -- Col 113  (c_staff_loan_yn from loan_dtl_cghfl)
+    CASE WHEN UPPER(la.c_staff_loan_yn) = 'Y' THEN 'Yes' ELSE 'No' END
+                                                               AS "Staff Loan (Yes/No)",
+
+    -- Col 114  [CANNOT FIND – NRI flag not in current tables]
+    NULL                                                       AS "NRI Loan (Yes/No)",
+
+    -- Col 115  (c_restructure_yn from loan_dtl; c_cov_restructure for COVID OTR)
+    CASE
+        WHEN UPPER(COALESCE(la.c_restructure_yn, 'N')) = 'Y' THEN 'Yes'
+        ELSE 'No'
+    END                                                        AS "Restructured Flag (including OTR 1/OTR 2)",
+
+    -- Col 116  [CANNOT FIND – ECLGS not applicable / not in DB]
+    NULL                                                       AS "ECLGS",
+
+    -- Col 117  [CANNOT FIND – link loan pool flag not in DB]
+    NULL                                                       AS "Link loan Part of pool (Yes/ No)",
+
+    -- Col 118  [CANNOT FIND – link loan number not in DB]
+    NULL                                                       AS "Link Loan/Top up loan Number if applicable",
+
+    -- ── NPA & PSL (Cols 119-120) ─────────────────────────────────────────
+
+    -- Col 119  (npa_flag from loan_dtl_cghfl: 'Y' if ever NPA since origination)
+    CASE WHEN UPPER(COALESCE(la.npa_flag, 'N')) = 'Y' THEN 'Y' ELSE 'N' END
+                                                               AS "Loan became NPA since origination (Y/N)",
+
+    -- Col 120  (c_psl from loan_dtl_cghfl: PSL/NPSL classification)
+    la.c_psl                                                   AS "PSL/NPSL flag",
+
+    -- ── DPD Strings (Cols 121-126) ────────────────────────────────────────
+
+    -- Col 121  (built from loan_status_monthly_cghfl last 12 months; DPD per month)
+    dpd12.dpd_str_12m                                          AS "DPD string - Last 12 months (At customer level)",
+
+    -- Col 122  (sz_delinquency_str from loan_dtl = current DPD/delinquency string)
+    la.sz_delinquency_str                                      AS "DPD string (Since Inception)",
+
+    -- Col 123  (B=BOUNCE, C=CLEAR per month; latest first; from CBR table)
+    bl12.bounce_str_12m                                        AS "bounce dpd string for last 12 month (no of days uptil bounce is cleared)",
+
+    -- Col 124  (same format, all months since first disbursement; from CBR table)
+    binc.bounce_str_all                                        AS "Gross Bounce String (Since Inception)",
+
+    -- Col 125  (same as col 123 – last 12 months bounce string)
+    bl12.bounce_str_12m                                        AS "bounce string since last 12 month",
+
+    -- Col 126  (GREATEST of LSM + Provision — conservative, covers LSM history gaps)
+    GREATEST(
+        COALESCE(dmax.max_ever_dpd, 0),
+        COALESCE(pmax.max_ever_dpd_prov, 0)
+    )                                                          AS "Max Ever DPD at customer level",
+
+    -- ── Financials (Cols 127-129) ─────────────────────────────────────────
+
+    -- Col 127  (age of primary financial applicant in years; from dt_birth_date)
+    DATEDIFF(
+        YEAR,
+        ap.a1_dob,
+        CURRENT_DATE
+    )                                                          AS "financial applicant age",
+
+    -- Col 128  (foir_wo_insurance is stored as percentage e.g. 45.3; divide by 100 → 0.453)
+    ROUND(TRY_CAST(la.foir_wo_insurance AS DECIMAL(10, 4)) / 100.0, 4) AS "FOIR",
+
+    -- Col 129  (total_eligible_income from application_cghfl is MONTHLY; × 12 = annual)
+    TRY_CAST(la.total_eligible_income AS DECIMAL(18, 2)) * 12  AS "Annual Income",
+
+    -- ── Legal & CERSAI (Cols 130-132) ─────────────────────────────────────
+
+    -- Col 130  [CANNOT FIND – Legal report document status not in analytics tables]
+    NULL                                                       AS "Legal Report ",
+
+    -- Col 131  (sz_cersai_sec_int_id from asset_cghfl = CERSAI security interest ID)
+    ast.sz_cersai_sec_int_id                                   AS "CERSAI ID",
+
+    -- Col 132  (dt_cersai from asset_cghfl = CERSAI registration date)
+    ast.dt_cersai                                              AS "CERSAI Registration date"
+
+FROM loan_app la
+LEFT JOIN appl_pivot    ap   ON ap.sz_application_no  = la.sz_application_no
+LEFT JOIN borrow_addr   ba   ON ba.sz_loan_account_no  = la.sz_loan_account_no
+LEFT JOIN asset_top     ast  ON ast.sz_application_no  = la.sz_application_no
+LEFT JOIN lsm_latest    lsm  ON lsm.sz_loan_account_no = la.sz_loan_account_no
+LEFT JOIN dpd_last12    dpd12 ON dpd12.sz_loan_account_no = la.sz_loan_account_no
+LEFT JOIN dpd_max       dmax  ON dmax.sz_loan_account_no = la.sz_loan_account_no
+LEFT JOIN advance_info  adv   ON adv.sz_loan_account_no  = la.sz_loan_account_no
+LEFT JOIN next_due      nd    ON nd.sz_loan_account_no   = la.sz_loan_account_no
+LEFT JOIN bounce_last12 bl12  ON bl12.sz_loan_account_no = la.sz_loan_account_no
+LEFT JOIN bounce_inception binc ON binc.sz_loan_account_no = la.sz_loan_account_no
+LEFT JOIN pdd_status    pdd   ON pdd.sz_loan_account_no  = la.sz_loan_account_no
+LEFT JOIN prov_max_dpd  pmax  ON pmax.sz_loan_account_no = la.sz_loan_account_no
+
+ORDER BY la.sz_loan_account_no;
+
+
+-- ============================================================
+-- COLUMNS NOT AVAILABLE IN DB  (returned as NULL)
+-- ============================================================
+-- Col 108-109: PDD status
+--           → SOURCED from analytics_reporting.otc_pdd_table_cghfl.
+--             Join key is loan_acc_no (NOT sz_loan_account_no).
+--             'Y' when no critical PDD docs remain unreceived.
+--             Note: many loans have only OTC docs (not PDD); these
+--             default to 'Y' (complete) via COALESCE.
+--
+-- Col 110: Subvention Scheme if any
+--           → No subvention flag found in loan_dtl or application tables.
+--
+-- Col 112: PMAY subsidy status
+--           → "pmay - clss" column exists in loan_dtl but only the flag,
+--             not the subsidy claim/receipt status.
+--
+-- Col 114: NRI Loan (Yes/No)
+--           → No NRI flag exists in any accessible CGHFL table.
+--
+-- Col 116: ECLGS
+--           → Not applicable for HE loans; not in DB.
+--
+-- Col 117: Link loan Part of pool (Yes/No)
+--           → Not tracked in analytics tables.
+--
+-- Col 118: Link Loan/Top up loan Number if applicable
+--           → sz_parent_application in application_cghfl may hold BT
+--             source loan number but is not directly a "link loan" pool flag.
+--
+-- Col 123-125: Bounce strings
+--           → SOURCED from external_curated.NB_CBR_CGHFL_FINAL_NEW.
+--             bounce_status_3_day per EMI month; 'B'=BOUNCE, 'C'=CLEAR.
+--             Col 123 & 125 = last 12 months; Col 124 = since inception.
+--
+-- Col 130: Legal Report
+--           → Legal document receipt/completeness status is not in
+--             analytics_reporting. Legal verification STATUS (APPROVE/POSITIVE)
+--             is available in application_cghfl.lm1_status to lm3_status
+--             but that is workflow status, not the physical report flag.
+-- ============================================================

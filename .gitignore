@@ -12,7 +12,7 @@
 !archive/run_he_v4.py
 !archive/run_msme_v4.py
 
-# SQL folder and v4-dependent queries only
+# SQL folder
 !sql/
 !sql/simple_he_eligible.sql
 !sql/he_assets.sql
@@ -24,3 +24,36 @@
 !sql/msme_bounce.sql
 !sql/restructure.sql
 !sql/abhfl_serviceable.sql
+
+# Sanction format folders (new)
+!abfl_sanction_data/
+!abfl_sanction_data/*.py
+!abfl_sanction_data/*.sql
+!bajaj_sanction_format/
+!bajaj_sanction_format/*.py
+!bajaj_sanction_format/*.sql
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+
+# Config / credentials
+config/database.yaml
+
+# Excel output files (data, not code)
+ABFL_Formats/*.xlsx
+ABFL_Formats/*.xlsm
+ABFL_Formats/*.xlsb
+abfl_sanction_data/*.xlsx
+
+# Temp / debug scripts
+_check_*.py
+_test_*.py
+_crossval_*.py
+
+# OS
+.DS_Store
+Thumbs.db
