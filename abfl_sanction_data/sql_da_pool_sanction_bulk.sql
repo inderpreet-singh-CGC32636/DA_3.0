@@ -959,10 +959,10 @@ SELECT
     -- Col 114  [NRI flag not in DB]
     NULL                                                       AS "NRI Loan (Yes/No)",
 
-    -- Col 115
+    -- Col 115 (standardised to Y/N)
     CASE
-        WHEN UPPER(COALESCE(la.c_restructure_yn, 'N')) = 'Y' THEN 'Yes'
-        ELSE 'No'
+        WHEN UPPER(COALESCE(la.c_restructure_yn, 'N')) = 'Y' THEN 'Y'
+        ELSE 'N'
     END                                                        AS "Restructured Flag (including OTR 1/OTR 2)",
 
     -- Col 116  [not applicable / not in DB]
@@ -992,7 +992,7 @@ SELECT
     -- LISTAGG of all monthly DPD from inception; inactive loans show status
     CASE
         WHEN UPPER(COALESCE(dinc.last_loan_status, '')) NOT IN ('APPROVED', 'LIVE', 'ACTIVE', '')
-        THEN UPPER(dinc.last_loan_status)
+        THEN REPLACE(UPPER(dinc.last_loan_status), ' - ', '-')
         ELSE COALESCE(dinc.dpd_str_inception, 'NO_DATA')
     END                                                        AS "DPD string (Since Inception)",
 

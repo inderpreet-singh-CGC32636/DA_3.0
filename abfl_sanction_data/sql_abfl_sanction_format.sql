@@ -916,10 +916,10 @@ SELECT
     -- Col 114  [CANNOT FIND – NRI flag not in current tables]
     NULL                                                       AS "NRI Loan (Yes/No)",
 
-    -- Col 115  (c_restructure_yn from loan_dtl; c_cov_restructure for COVID OTR)
+    -- Col 115  (c_restructure_yn from loan_dtl; standardised to Y/N)
     CASE
-        WHEN UPPER(COALESCE(la.c_restructure_yn, 'N')) = 'Y' THEN 'Yes'
-        ELSE 'No'
+        WHEN UPPER(COALESCE(la.c_restructure_yn, 'N')) = 'Y' THEN 'Y'
+        ELSE 'N'
     END                                                        AS "Restructured Flag (including OTR 1/OTR 2)",
 
     -- Col 116  [CANNOT FIND – ECLGS not applicable / not in DB]
@@ -948,7 +948,8 @@ SELECT
     -- Col 122  (LISTAGG of all monthly DPD from inception; inactive loans show status)
     CASE
         WHEN UPPER(COALESCE(dinc.last_loan_status, '')) NOT IN ('APPROVED', 'LIVE', 'ACTIVE', '')
-        THEN UPPER(dinc.last_loan_status)
+        -- Replace space-hyphen variants to keep status clean (e.g. CLOSED-FORECLOSED)
+        THEN REPLACE(UPPER(dinc.last_loan_status), ' - ', '-')
         ELSE COALESCE(dinc.dpd_str_inception, 'NO_DATA')
     END                                                        AS "DPD string (Since Inception)",
 
