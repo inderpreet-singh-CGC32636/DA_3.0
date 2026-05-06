@@ -57,7 +57,12 @@ loan_app AS (
         app.sz_risk_grade                                       AS app_risk_grade,
         app.loan_purpose_description,
         -- constitution lives in disbursement_cghfl_v2, not in application/loan tables
-        disb_c.constitution
+        disb_c.constitution,
+        -- Application-level occupation/industry fields (72-49% coverage, readable values)
+        app.services_type,
+        app.nature_of_business,
+        app.industry_type,
+        app.sub_industry_type
     FROM analytics_reporting.loan_dtl_cghfl ld
     JOIN analytics_reporting.application_cghfl app
         ON app.sz_application_no = ld.sz_application_no
@@ -106,11 +111,11 @@ appl_ranked AS (
             WHEN apt.person_name IS NOT NULL                           THEN 'Individual'
             ELSE NULL
         END                                                     AS cust_subtype,
-        -- Col 11: In case of self employed (SENP/SEP) — NULL for Salaried
-        -- SEP checked first to prevent 'sep - nip' misclassification as SENP
+        -- Col 11: In case of self employed (SENP/SEP) — show Salaried/SENP/SEP for all
+        -- SEP checked first to prevent 'sep - nip' being caught by %nip%
         CASE
             WHEN LOWER(apt.income_program) LIKE '%salar%'
-              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'               THEN NULL
+              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'               THEN 'Salaried'
             WHEN LOWER(apt.income_program) LIKE '%sep%'
               OR UPPER(TRIM(apt.sz_salary_typ)) = 'SEP'               THEN 'SEP'
             WHEN LOWER(apt.income_program) LIKE '%senp%'
@@ -121,11 +126,19 @@ appl_ranked AS (
               OR UPPER(TRIM(apt.sz_salary_typ)) = 'SENP'              THEN 'SENP'
             ELSE NULL
         END                                                     AS senp_sep_type,
-        -- Occupation: sz_primary_occupation is most populated; industry types as fallback
+        -- Occupation/Industry: readable labels preferred over raw codes
+        -- sz_primary_occupation gives internal codes (N_ERN, NP_SELF) — excluded
+        -- self_employment_sz_org_type_code: TRD=Trading, SER=Service, MANU=Manufacturing (72% fill)
+        -- sz_emp_bus_nm: employer/business name — 100% fill, last readable fallback
         COALESCE(
-            NULLIF(TRIM(apt.sz_primary_occupation), ''),
             NULLIF(TRIM(apt.ind_sz_industry_type), ''),
-            NULLIF(TRIM(apt.org_sz_industry_type), '')
+            NULLIF(TRIM(apt.org_sz_industry_type), ''),
+            NULLIF(TRIM(apt.ind_sz_nature_off_business), ''),
+            NULLIF(TRIM(apt.org_sz_nature_off_business), ''),
+            NULLIF(TRIM(apt.sznature_emp_buss), ''),
+            NULLIF(TRIM(apt.self_employment_sz_org_type_code), ''),
+            NULLIF(TRIM(apt.employment_sz_org_type_code), ''),
+            NULLIF(TRIM(apt.sz_emp_bus_nm), '')
         )                                                       AS occupation,
         -- Income assessment method
         apt.income_type                                         AS income_type,
@@ -200,7 +213,7 @@ appl_pivot AS (
         MAX(CASE WHEN seq = 1 THEN cust_type  END)             AS a1_cust_type,
         MAX(CASE WHEN seq = 1 THEN c_incm_consid END)          AS a1_is_financial,
         MAX(CASE WHEN seq = 1 THEN cust_subtype END)           AS a1_subtype,
-        MAX(CASE WHEN seq = 1 AND senp_sep_type IN ('SENP','SEP') THEN senp_sep_type END) AS a1_senp_sep,
+        MAX(CASE WHEN seq = 1 THEN senp_sep_type END) AS a1_senp_sep,
         MAX(CASE WHEN seq = 1 THEN occupation END)              AS a1_occupation,
         MAX(CASE WHEN seq = 1 THEN income_type END)             AS a1_income_type,
         MAX(CASE WHEN seq = 1 THEN constitution END)            AS a1_constitution,
@@ -580,8 +593,14 @@ SELECT
     -- Col 11 (populated only when SENP or SEP)
     ap.a1_senp_sep                                             AS "In case of self employed (SENP/ SEP)",
 
-    -- Col 12
-    ap.a1_occupation                                           AS "Occupation/Industry",
+    -- Col 12 — application-level fields first (more reliable), then applicant-level fallback
+    COALESCE(
+        NULLIF(TRIM(la.services_type), ''),
+        NULLIF(TRIM(la.nature_of_business), ''),
+        NULLIF(TRIM(la.industry_type), ''),
+        NULLIF(TRIM(la.sub_industry_type), ''),
+        NULLIF(TRIM(ap.a1_occupation), '')
+    )                                                          AS "Occupation/Industry",
 
     -- Col 13 (sz_org_constitution from applicant_basic_dtl_cghfl for non-individual borrowers)
     ap.a1_constitution                                         AS "Constitution",
