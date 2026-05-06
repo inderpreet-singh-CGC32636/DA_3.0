@@ -167,13 +167,42 @@ appl_ranked AS (
         )                                                       AS occupation,
         -- Income assessment method
         apt.income_type                                         AS income_type,
-        -- Constitution: Individual for persons; sz_org_constitution for entities
+        -- Constitution: derived from org constitution code → full name,
+        -- or from income_program/salary_typ for individual borrowers
         CASE
-            WHEN apt.person_name IS NOT NULL
-                 AND UPPER(COALESCE(apt.sz_appl_category_code, 'I')) LIKE '%I%'
-            THEN 'Individual'
+            -- Non-individual: map org constitution codes to readable names
             WHEN apt.sz_org_constitution IS NOT NULL
-            THEN apt.sz_org_constitution
+            THEN CASE
+                     WHEN UPPER(TRIM(apt.sz_org_constitution)) IN ('SPR','PROP','SOLE PROP','SOLE PROPRIETOR','SOLE PROPRIETORSHIP')
+                          OR LOWER(apt.sz_org_constitution) LIKE '%sole prop%'     THEN 'Sole Proprietor'
+                     WHEN UPPER(TRIM(apt.sz_org_constitution)) IN ('P','PAR','PART','PARTNERSHIP')
+                          OR LOWER(apt.sz_org_constitution) LIKE '%partner%'       THEN 'Partnership'
+                     WHEN UPPER(TRIM(apt.sz_org_constitution)) IN ('PVT','PVT LTD','PRIVATE LIMITED','PRIVATE LTD')
+                          OR LOWER(apt.sz_org_constitution) LIKE '%private limit%' THEN 'Private Limited'
+                     WHEN UPPER(TRIM(apt.sz_org_constitution)) IN ('PLC','PUBLIC LIMITED','PUBLIC LTD')
+                          OR LOWER(apt.sz_org_constitution) LIKE '%public limit%'  THEN 'Public Limited'
+                     WHEN UPPER(TRIM(apt.sz_org_constitution)) = 'LLP'
+                          OR LOWER(apt.sz_org_constitution) LIKE '%llp%'           THEN 'LLP'
+                     WHEN UPPER(TRIM(apt.sz_org_constitution)) = 'HUF'            THEN 'HUF'
+                     WHEN UPPER(TRIM(apt.sz_org_constitution)) IN ('TRUST','NGO')  THEN UPPER(TRIM(apt.sz_org_constitution))
+                     WHEN LOWER(apt.sz_org_constitution) LIKE '%societ%'          THEN 'Society'
+                     WHEN LOWER(apt.sz_org_constitution) LIKE '%co-op%'
+                          OR LOWER(apt.sz_org_constitution) LIKE '%coop%'          THEN 'Co-operative Society'
+                     ELSE INITCAP(apt.sz_org_constitution)
+                 END
+            -- Individual salaried
+            WHEN LOWER(apt.income_program) LIKE '%salar%'
+              OR UPPER(TRIM(apt.sz_salary_typ)) = 'SAL'
+            THEN 'Salaried'
+            -- Individual self-employed (SENP/SEP = Sole Proprietor)
+            WHEN LOWER(apt.income_program) LIKE '%senp%'
+              OR LOWER(apt.income_program) LIKE '%sep%'
+              OR apt.income_program IN ('Self Employed - NIP-CPM', 'Self Employed - NIP')
+              OR UPPER(TRIM(apt.sz_salary_typ)) IN ('SENP', 'SEP')
+            THEN 'Sole Proprietor'
+            -- Fallback for other individuals
+            WHEN apt.person_name IS NOT NULL
+            THEN 'Individual'
             WHEN apt.sz_org_name IS NOT NULL
             THEN 'Non-Individual'
             ELSE NULL
