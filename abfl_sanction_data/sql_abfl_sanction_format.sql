@@ -314,6 +314,23 @@ dpd_last12 AS (
 ),
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 7b: DPD string – since inception (all months; oldest first)
+-- Inactive loans (not APPROVED) show their loan_status instead of DPD string
+-- ─────────────────────────────────────────────────────────────────────────────
+dpd_inception AS (
+    SELECT
+        sz_loan_account_no,
+        LISTAGG(
+            LPAD(CAST(COALESCE(i_dpd, 0) AS VARCHAR), 3, '0'),
+            '-'
+        ) WITHIN GROUP (ORDER BY dt_businessdate)               AS dpd_str_inception,
+        MAX(UPPER(loan_status))                                  AS last_loan_status
+    FROM analytics_reporting.loan_status_monthly_cghfl
+    WHERE sz_loan_account_no IN ({LAN_LIST})
+    GROUP BY sz_loan_account_no
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- CTE 8: Max ever DPD (across all monthly snapshots)
 -- ─────────────────────────────────────────────────────────────────────────────
 dpd_max AS (
@@ -868,8 +885,12 @@ SELECT
     -- Col 121  (built from loan_status_monthly_cghfl last 12 months; DPD per month)
     dpd12.dpd_str_12m                                          AS "DPD string - Last 12 months (At customer level)",
 
-    -- Col 122  (sz_delinquency_str from loan_dtl = current DPD/delinquency string)
-    la.sz_delinquency_str                                      AS "DPD string (Since Inception)",
+    -- Col 122  (LISTAGG of all monthly DPD from inception; inactive loans show status)
+    CASE
+        WHEN UPPER(COALESCE(dinc.last_loan_status, '')) NOT IN ('APPROVED', 'LIVE', 'ACTIVE', '')
+        THEN UPPER(dinc.last_loan_status)
+        ELSE COALESCE(dinc.dpd_str_inception, 'NO_DATA')
+    END                                                        AS "DPD string (Since Inception)",
 
     -- Col 123  (B=BOUNCE, C=CLEAR per month; latest first; from CBR table)
     bl12.bounce_str_12m                                        AS "bounce dpd string for last 12 month (no of days uptil bounce is cleared)",
@@ -895,8 +916,8 @@ SELECT
         CURRENT_DATE
     )                                                          AS "financial applicant age",
 
-    -- Col 128  (foir_wo_insurance is stored as percentage e.g. 45.3; divide by 100 → 0.453)
-    ROUND(TRY_CAST(la.foir_wo_insurance AS DECIMAL(10, 4)) / 100.0, 4) AS "FOIR",
+    -- Col 128  (foir_wo_insurance stored as percentage e.g. 45.3 → output as-is in %)
+    ROUND(TRY_CAST(la.foir_wo_insurance AS DECIMAL(10, 2)), 2)  AS "FOIR",
 
     -- Col 129  (total_eligible_income from application_cghfl is MONTHLY; × 12 = annual)
     TRY_CAST(la.total_eligible_income AS DECIMAL(18, 2)) * 12  AS "Annual Income",
@@ -918,6 +939,7 @@ LEFT JOIN borrow_addr   ba   ON ba.sz_loan_account_no  = la.sz_loan_account_no
 LEFT JOIN asset_top     ast  ON ast.sz_application_no  = la.sz_application_no
 LEFT JOIN lsm_latest    lsm  ON lsm.sz_loan_account_no = la.sz_loan_account_no
 LEFT JOIN dpd_last12    dpd12 ON dpd12.sz_loan_account_no = la.sz_loan_account_no
+LEFT JOIN dpd_inception dinc  ON dinc.sz_loan_account_no = la.sz_loan_account_no
 LEFT JOIN dpd_max       dmax  ON dmax.sz_loan_account_no = la.sz_loan_account_no
 LEFT JOIN advance_info  adv   ON adv.sz_loan_account_no  = la.sz_loan_account_no
 LEFT JOIN next_due      nd    ON nd.sz_loan_account_no   = la.sz_loan_account_no
