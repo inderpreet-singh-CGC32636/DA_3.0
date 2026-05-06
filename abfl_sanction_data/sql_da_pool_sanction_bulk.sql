@@ -110,6 +110,7 @@ loan_app AS (
         app.sanction_amount,
         app.foir_wo_insurance,
         app.total_eligible_income,
+        app.ltv_wo_insurance,
         app.cibil_score                                         AS app_cibil_score,
         app.sz_risk_grade                                       AS app_risk_grade,
         app.loan_purpose_description,
@@ -166,8 +167,17 @@ appl_ranked AS (
         )                                                       AS occupation,
         -- Income assessment method
         apt.income_type                                         AS income_type,
-        -- Constitution (for non-individual borrowers)
-        apt.sz_org_constitution                                 AS constitution,
+        -- Constitution: Individual for persons; sz_org_constitution for entities
+        CASE
+            WHEN apt.person_name IS NOT NULL
+                 AND UPPER(COALESCE(apt.sz_appl_category_code, 'I')) LIKE '%I%'
+            THEN 'Individual'
+            WHEN apt.sz_org_constitution IS NOT NULL
+            THEN apt.sz_org_constitution
+            WHEN apt.sz_org_name IS NOT NULL
+            THEN 'Non-Individual'
+            ELSE NULL
+        END                                                     AS constitution,
         apt.c_gender,
         apt.dt_birth_date,
         NULLIF(TRIM(NVL(apt.sz_id2, apt.sz_panno)), '')        AS pan,
@@ -841,8 +851,11 @@ SELECT
         ELSE NULL
     END                                                        AS "Current LTV at asset level",
 
-    -- Col 92
-    la.f_ltv_per                                               AS "LTV (%) at collateral level at the time of original sanction ",
+    -- Col 92  (ltv_wo_insurance from application_cghfl; f_ltv_per as fallback)
+    COALESCE(
+        NULLIF(TRY_CAST(la.ltv_wo_insurance AS DECIMAL(10,2)), 0),
+        NULLIF(TRY_CAST(la.f_ltv_per        AS DECIMAL(10,2)), 0)
+    )                                                          AS "LTV (%) at collateral level at the time of original sanction ",
 
     -- Col 93
     ast.collateral_desc                                        AS "Collateral Description",
