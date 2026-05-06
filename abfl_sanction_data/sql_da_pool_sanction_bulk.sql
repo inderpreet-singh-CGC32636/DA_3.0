@@ -880,11 +880,8 @@ SELECT
         ELSE NULL
     END                                                        AS "Current LTV at asset level",
 
-    -- Col 92  (ltv_wo_insurance from application_cghfl; f_ltv_per as fallback)
-    COALESCE(
-        NULLIF(TRY_CAST(la.ltv_wo_insurance AS DECIMAL(10,2)), 0),
-        NULLIF(TRY_CAST(la.f_ltv_per        AS DECIMAL(10,2)), 0)
-    )                                                          AS "LTV (%) at collateral level at the time of original sanction ",
+    -- Col 92  (ltv_wo_insurance from application_cghfl — direct, no fallback)
+    TRY_CAST(la.ltv_wo_insurance AS DECIMAL(10,2))             AS "LTV (%) at collateral level at the time of original sanction ",
 
     -- Col 93
     ast.collateral_desc                                        AS "Collateral Description",
