@@ -40,7 +40,7 @@ loan_app AS (
         ld."pmay - clss",
         ld.c_restructure_yn,
         ld.npa_flag,
-        ld.sz_risk_grade                                        AS ld_risk_grade,
+        NULLIF(NULLIF(TRIM(ld.sz_risk_grade), ''), 'None')      AS ld_risk_grade,
         ld.sz_repayment_mode,
         ld.f_ltv_per,
         ld.f_adv_amt,
@@ -51,18 +51,28 @@ loan_app AS (
         app.sanction_date,
         app.sanction_amount,
         app.foir_wo_insurance,
+        app.foir_with_insurance,
+        app.eligible_foir,
+        app.sz_parent_application,
+        app.bt                                                      AS bt_type,
         app.total_eligible_income,
         app.ltv_wo_insurance,
         app.cibil_score                                         AS app_cibil_score,
-        app.sz_risk_grade                                       AS app_risk_grade,
+        NULLIF(NULLIF(TRIM(app.sz_risk_grade), ''), 'None')     AS app_risk_grade,
         app.loan_purpose_description,
+        app.loan_purpose_code,
         -- constitution lives in disbursement_cghfl_v2, not in application/loan tables
         disb_c.constitution,
-        -- Application-level occupation/industry fields (72-49% coverage, readable values)
+        -- Application-level occupation/industry fields
         app.services_type,
         app.nature_of_business,
         app.industry_type,
-        app.sub_industry_type
+        app.sub_industry_type,
+        -- Specific income-program industry details (18% fill, very specific values)
+        app.income_program_industry_details_industry_type    AS ipid_industry,
+        app.income_program_industry_details_sub_industry_type AS ipid_sub_industry,
+        -- Salaried designation fallback (100% fill for cases where other sources are null)
+        NULLIF(NULLIF(TRIM(app.latest_emp_designation), ''), 'None') AS app_latest_emp_designation
     FROM analytics_reporting.loan_dtl_cghfl ld
     JOIN analytics_reporting.application_cghfl app
         ON app.sz_application_no = ld.sz_application_no
@@ -76,6 +86,43 @@ loan_app AS (
         ) t WHERE rk = 1
     ) disb_c ON disb_c.sz_loan_account_no = ld.sz_loan_account_no
     WHERE ld.sz_loan_account_no IN ({LAN_LIST})
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 1b: Kuliza FOIR fallback (for Kuliza-Flexcube originated loans)
+--   foirmain_hl = FOIR stored in Kuliza datamart (not migrated to application_cghfl)
+--   Derived: ROUND(totalemi_hl / monthlycombinedincome_hl * 100, 2) when foirmain_hl = 0/NULL
+-- ─────────────────────────────────────────────────────────────────────────────
+kuliza_foir AS (
+    SELECT
+        CAST(lmsaccountid AS VARCHAR)                                   AS sz_loan_account_no,
+        ROUND(
+            COALESCE(
+                NULLIF(TRY_CAST(foirmain_hl AS DECIMAL(10,2)), 0),
+                CASE WHEN TRY_CAST(monthlycombinedincome_hl AS DECIMAL(15,2)) > 0
+                     THEN ROUND(TRY_CAST(totalemi_hl AS DECIMAL(15,2))
+                                / TRY_CAST(monthlycombinedincome_hl AS DECIMAL(15,2)) * 100, 2)
+                END
+            ),
+        2)                                                              AS kuliza_foir
+    FROM kuliza_datamart_snapshort.kuliza_act_ru_variable_transposed
+    WHERE lmsaccountid IS NOT NULL
+),
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CTE 1d: Linked / parent loan account number (for Top-Up and BT cases)
+--   sz_parent_application is the application no of the parent loan → join back
+--   to loan_dtl to get the actual loan account number.
+-- ─────────────────────────────────────────────────────────────────────────────
+linked_lan AS (
+    SELECT
+        la.sz_loan_account_no,
+        ld_parent.sz_loan_account_no AS parent_lan
+    FROM loan_app la
+    JOIN analytics_reporting.loan_dtl_cghfl ld_parent
+        ON ld_parent.sz_application_no = la.sz_parent_application
+    WHERE la.sz_parent_application IS NOT NULL
+      AND NULLIF(TRIM(la.sz_parent_application), '') IS NOT NULL
 ),
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -126,20 +173,22 @@ appl_ranked AS (
               OR UPPER(TRIM(apt.sz_salary_typ)) = 'SENP'              THEN 'SENP'
             ELSE NULL
         END                                                     AS senp_sep_type,
-        -- Occupation/Industry: readable labels preferred over raw codes
-        -- sz_primary_occupation gives internal codes (N_ERN, NP_SELF) — excluded
-        -- self_employment_sz_org_type_code: TRD=Trading, SER=Service, MANU=Manufacturing (72% fill)
-        -- sz_emp_bus_nm: employer/business name — 100% fill, last readable fallback
+        -- Occupation/Industry — applicant-level fallback chain (used only if app-level sources fail)
+        -- REMOVED: self_employment_sz_org_type_code / employment_sz_org_type_code (AES-encrypted)
+        -- REMOVED: sz_primary_occupation (garbage: 'ok','friend','NP_SELF','EMP')
         COALESCE(
             NULLIF(TRIM(apt.ind_sz_industry_type), ''),
             NULLIF(TRIM(apt.org_sz_industry_type), ''),
+            lk_nob.szdescription,
             NULLIF(TRIM(apt.ind_sz_nature_off_business), ''),
             NULLIF(TRIM(apt.org_sz_nature_off_business), ''),
-            NULLIF(TRIM(apt.sznature_emp_buss), ''),
-            NULLIF(TRIM(apt.self_employment_sz_org_type_code), ''),
-            NULLIF(TRIM(apt.employment_sz_org_type_code), ''),
-            NULLIF(TRIM(apt.sz_emp_bus_nm), '')
+            NULLIF(TRIM(apt.sznature_emp_buss), '')
         )                                                       AS occupation,
+        -- Employment sector industry (salaried-specific, 42% fill, clean readable)
+        NULLIF(TRIM(apt.employment_sz_industry_type), '')       AS emp_industry,
+        NULLIF(TRIM(apt.employment_sz_sub_industry), '')        AS emp_sub_industry,
+        -- Designation for salaried borrowers (93.9% fill: TEACHER/Driver/MECHANIC/etc.)
+        NULLIF(NULLIF(TRIM(apt.employment_sz_designation), ''), 'None') AS emp_designation,
         -- Income assessment method
         apt.income_type                                         AS income_type,
         -- Constitution: derived from org constitution code → full name,
@@ -187,6 +236,8 @@ appl_ranked AS (
         NULLIF(TRIM(NVL(apt.sz_id2, apt.sz_panno)), '')        AS pan,
         apt.sz_cibil_score,
         apt.c_incm_consid,
+        -- KYC risk grade (100% filled for Kuliza cases where app/loan risk grade is null)
+        NULLIF(NULLIF(TRIM(apt.sz_kyc_risk), ''), 'None')      AS kyc_risk,
         ROW_NUMBER() OVER (
             PARTITION BY apt.sz_application_no
             ORDER BY
@@ -194,6 +245,10 @@ appl_ranked AS (
                 apt.i_applicant_id
         )                                                       AS seq
     FROM analytics_reporting.applicant_basic_dtl_cghfl apt
+    -- Decode ind_sz_nature_off_business codes (e.g. GROCERY -> 'Grocery')
+    LEFT JOIN analytics_reporting.base_app_mst_lookups_cghfl lk_nob
+        ON lk_nob.szlookupefinedfor = 'L_NATURE_OFF_BUSINESS'
+        AND lk_nob.szcode = apt.ind_sz_nature_off_business
     WHERE apt.sz_application_no IN (
         SELECT sz_application_no
         FROM analytics_reporting.loan_dtl_cghfl
@@ -215,11 +270,15 @@ appl_pivot AS (
         MAX(CASE WHEN seq = 1 THEN cust_subtype END)           AS a1_subtype,
         MAX(CASE WHEN seq = 1 THEN senp_sep_type END) AS a1_senp_sep,
         MAX(CASE WHEN seq = 1 THEN occupation END)              AS a1_occupation,
+        MAX(CASE WHEN seq = 1 THEN emp_industry END)            AS a1_emp_industry,
+        MAX(CASE WHEN seq = 1 THEN emp_sub_industry END)        AS a1_emp_sub_industry,
+        MAX(CASE WHEN seq = 1 THEN emp_designation END)         AS a1_emp_designation,
         MAX(CASE WHEN seq = 1 THEN income_type END)             AS a1_income_type,
         MAX(CASE WHEN seq = 1 THEN constitution END)            AS a1_constitution,
         MAX(CASE WHEN seq = 1 THEN dt_birth_date END)          AS a1_dob,
         MAX(CASE WHEN seq = 1 THEN pan END)                    AS a1_pan,
         MAX(CASE WHEN seq = 1 THEN sz_cibil_score END)         AS a1_cibil,
+        MAX(CASE WHEN seq = 1 THEN kyc_risk END)               AS a1_kyc_risk,
         -- Applicant 2
         MAX(CASE WHEN seq = 2 THEN cust_name  END)             AS a2_name,
         MAX(CASE WHEN seq = 2 THEN cust_type  END)             AS a2_cust_type,
@@ -320,9 +379,42 @@ asset_top AS (
         SELECT
             ast.sz_application_no,
             ast.i_asset_srno,
-            ast.sz_description                                  AS collateral_desc,
+            -- Collateral Description: sub-type (Row House, Flat, Bungalow etc.)
+            -- property_subtype is cleanest; fall back to decoded sz_subtype codes
+            COALESCE(
+                NULLIF(INITCAP(NULLIF(TRIM(ast.property_subtype), '')), 'None'),
+                CASE UPPER(TRIM(ast.sz_subtype))
+                    WHEN 'RHO'  THEN 'Row House'
+                    WHEN 'FLT'  THEN 'Flat'
+                    WHEN 'BUNG' THEN 'Bungalow'
+                    WHEN 'SHOP' THEN 'Shop'
+                    WHEN 'OTH'  THEN 'Others'
+                    WHEN 'APRT' THEN 'Apartment'
+                    WHEN 'VILLA' THEN 'Villa'
+                    WHEN 'PENT' THEN 'Penthouse'
+                    WHEN 'INDP' THEN 'Independent House'
+                    WHEN 'PLOT' THEN 'Plot'
+                    ELSE NULLIF(INITCAP(NULLIF(TRIM(ast.sz_subtype), '')), 'None')
+                END
+            )                                                              AS collateral_desc,
             ast.property_type,
-            ast.a_sz_prop_usage                                 AS collateral_use,
+            -- Collateral Use: property_occupation is 100% filled; normalize inconsistent codes
+            CASE
+                WHEN UPPER(TRIM(ast.property_occupation)) IN ('SELF', 'SELF-OCCUPIED', 'SELF OCCUPIED',
+                     'SELF OWNED AND SELF OCCUPIED', 'FAMILY OWNED AND FAMILY OCCUPIED')
+                                                           THEN 'Self-Occupied'
+                WHEN UPPER(TRIM(ast.property_occupation)) IN ('SELF + RENTED', 'SELF+RENTED')
+                                                           THEN 'Self + Rented'
+                WHEN UPPER(TRIM(ast.property_occupation)) IN ('RENTED', 'RENT')
+                                                           THEN 'Rented'
+                WHEN UPPER(TRIM(ast.property_occupation)) IN ('VACANT', 'VCNT')
+                                                           THEN 'Vacant'
+                WHEN UPPER(TRIM(ast.property_occupation)) IN ('UNDERCONSTRUCTION', 'UNDER CONSTRUCTION',
+                     'UNDER-CONSTRUCTION')                 THEN 'Under Construction'
+                WHEN NULLIF(NULLIF(TRIM(ast.property_occupation), ''), 'None') IS NOT NULL
+                                                           THEN INITCAP(TRIM(ast.property_occupation))
+                ELSE NULL
+            END                                                            AS collateral_use,
             COALESCE(ast.is_under_construction, 'N')            AS is_under_construction,
             CASE
                 WHEN UPPER(TRIM(ast.property_type)) LIKE '%PLOT%'
@@ -330,6 +422,11 @@ asset_top AS (
                 THEN 'Y' ELSE 'N'
             END                                                 AS open_plot_flag,
             ast.a_i_tot_valuation                               AS collateral_value,
+            -- PSL derivation fields (RBI criteria: property value + area type)
+            ast.sz_area_type,
+            SUM(ast.a_i_tot_valuation) OVER (
+                PARTITION BY ast.sz_application_no
+            )                                                   AS total_property_value,
             TRIM(
                 COALESCE(ast.sz_address_1, '') || ' ' ||
                 COALESCE(ast.sz_address_2, '') || ' ' ||
@@ -564,6 +661,9 @@ SELECT
     -- Col 2
     la.sz_loan_account_no                                      AS "Loan No.",
 
+    -- Extra: Application No (beside Loan No for Kuliza identification — app nos LNHE...KZ... = Kuliza-Flexcube)
+    la.sz_application_no                                       AS "Application No.",
+
     -- Col 3
     la.sz_customer_no                                          AS "Unique Cutomer ID No. ",
 
@@ -593,13 +693,26 @@ SELECT
     -- Col 11 (populated only when SENP or SEP)
     ap.a1_senp_sep                                             AS "In case of self employed (SENP/ SEP)",
 
-    -- Col 12 — application-level fields first (more reliable), then applicant-level fallback
+    -- Col 12 — priority: specific > generic; encrypted sources removed
+    -- ipid_sub (18%): "Kirana Store","Dairy Farm","Civil Contractors" (most specific)
+    -- ipid_type (18%): "FMCG Retail","Contractors","Dairy and allied"
+    -- emp_industry (42%): "Other Services","Food Processing","Other Traders" (salaried)
+    -- industry_type (23%): "FOOD PROCESSING","KIRANA & GROCERY"
+    -- services_type (75%): "SERVICE","TRADERS" (generic fallback)
     COALESCE(
-        NULLIF(TRIM(la.services_type), ''),
-        NULLIF(TRIM(la.nature_of_business), ''),
+        NULLIF(TRIM(la.ipid_sub_industry), ''),
+        NULLIF(TRIM(la.ipid_industry), ''),
+        NULLIF(TRIM(ap.a1_emp_industry), ''),
+        NULLIF(TRIM(ap.a1_emp_sub_industry), ''),
         NULLIF(TRIM(la.industry_type), ''),
         NULLIF(TRIM(la.sub_industry_type), ''),
-        NULLIF(TRIM(ap.a1_occupation), '')
+        NULLIF(TRIM(ap.a1_occupation), ''),
+        -- Salaried fallback 1: applicant-level designation (93.9% fill)
+        NULLIF(TRIM(ap.a1_emp_designation), ''),
+        -- Salaried fallback 2: application-level latest designation (100% fill for gap cases)
+        NULLIF(TRIM(la.app_latest_emp_designation), ''),
+        NULLIF(TRIM(la.services_type), ''),
+        NULLIF(TRIM(la.nature_of_business), '')
     )                                                          AS "Occupation/Industry",
 
     -- Col 13 (sz_org_constitution from applicant_basic_dtl_cghfl for non-individual borrowers)
@@ -785,11 +898,40 @@ SELECT
 
     -- ── Risk & Classification (Cols 68-70) ───────────────────────────────
 
-    -- Col 68  (sz_risk_grade in both loan_dtl and application; prefer loan_dtl)
-    COALESCE(la.ld_risk_grade, la.app_risk_grade)              AS "Risk Categorization",
+    -- Col 68 — app.sz_risk_grade is 99.8% filled; loan_dtl is only 47% and has 'None' strings
+    -- app_risk_grade: 100% for Pragati; ld_risk_grade: 47%; a1_kyc_risk: 100% for Kuliza
+    INITCAP(COALESCE(la.app_risk_grade, la.ld_risk_grade, ap.a1_kyc_risk)) AS "Risk Categorization",
 
-    -- Col 69
-    la.end_use_loan_description                                AS "End use as per end use letter /Sanction letter",
+    -- Col 69  (normalize variant spellings: "Top Up"/"Top-up", "and/ or"/"and/or")
+    CASE
+        -- Primary: end_use_loan_description (normalized)
+        WHEN LOWER(TRIM(la.end_use_loan_description)) LIKE '%top%up%'
+          OR LOWER(TRIM(la.end_use_loan_description)) LIKE '%top-up%'
+                                                     THEN 'Top-Up Loan'
+        WHEN LOWER(TRIM(la.end_use_loan_description)) LIKE '%balance transfer%'
+                                                     THEN 'Balance Transfer of Loan'
+        WHEN LOWER(TRIM(la.end_use_loan_description)) LIKE '%business%'
+                                                     THEN 'Business Expansion and/or Working Capital Needs'
+        WHEN LOWER(TRIM(la.end_use_loan_description)) LIKE '%purchase%'
+          OR LOWER(TRIM(la.end_use_loan_description)) LIKE '%construct%'
+          OR LOWER(TRIM(la.end_use_loan_description)) LIKE '%renovation%'
+                                                     THEN 'Purchase/Construction/Extension/Renovation of Property'
+        WHEN NULLIF(TRIM(la.end_use_loan_description), '') IS NOT NULL
+                                                     THEN INITCAP(TRIM(la.end_use_loan_description))
+        -- Fallback: loan_purpose_code / loan_purpose_description (for HE Semi-Fixed cases where end_use is blank)
+        WHEN UPPER(TRIM(la.loan_purpose_code)) = 'LAP'
+                                                     THEN 'Purchase/Construction/Extension/Renovation of Property'
+        WHEN LOWER(TRIM(la.loan_purpose_description)) LIKE '%refinance%'
+          OR LOWER(TRIM(la.loan_purpose_description)) LIKE '%balance transfer%'
+                                                     THEN 'Balance Transfer of Loan'
+        WHEN LOWER(TRIM(la.loan_purpose_description)) LIKE '%top%up%'
+                                                     THEN 'Top-Up Loan'
+        WHEN LOWER(TRIM(la.loan_purpose_description)) LIKE '%business%'
+                                                     THEN 'Business Expansion and/or Working Capital Needs'
+        WHEN NULLIF(TRIM(la.loan_purpose_description), '') IS NOT NULL
+                                                     THEN INITCAP(TRIM(la.loan_purpose_description))
+        ELSE NULL
+    END                                                        AS "End use as per end use letter /Sanction letter",
 
     -- Col 70  (income_type from applicant_basic_dtl_cghfl: Income/Surrogate/Assessed)
     ap.a1_income_type                                          AS "Income Assesment method - Income /Surrogate/Assessed",
@@ -828,8 +970,17 @@ SELECT
 
     -- ── Rate & Outstanding (Cols 80-84) ──────────────────────────────────
 
-    -- Col 80  (c_interest_rate_type: F=Fixed, V=Variable/Floating)
-    la.c_interest_rate_type                                    AS "Rate Type",
+    -- Col 80  (c_interest_rate_type: F=Fixed, V=Floating, M=Mixed; also handles already-decoded strings)
+    CASE UPPER(TRIM(la.c_interest_rate_type))
+        WHEN 'V'          THEN 'Floating'
+        WHEN 'F'          THEN 'Fixed'
+        WHEN 'M'          THEN 'Mixed'
+        WHEN 'FLOATING'   THEN 'Floating'
+        WHEN 'FIXED'      THEN 'Fixed'
+        WHEN 'MIXED'      THEN 'Mixed'
+        WHEN 'SEMI-FIXED' THEN 'Semi-Fixed'
+        ELSE INITCAP(NULLIF(TRIM(la.c_interest_rate_type), ''))
+    END                                                        AS "Rate Type",
 
     -- Col 81  (current live interest rate)
     la.f_curr_interestrate                                     AS "Current ROI",
@@ -930,8 +1081,11 @@ SELECT
     -- Col 108  (Y = all critical PDD docs received / no PDD docs pending)
     COALESCE(pdd.pdd_complete, 'Y')                            AS "PDD status complete (Y/N)",
 
-    -- Col 109  (semicolon-separated critical PDD docs not yet received)
-    NULLIF(pdd.pdd_pending_docs, '')                           AS "PDD status, if pending (Mention any critical docs)",
+    -- Col 109: if PDD complete = Y → 'No' (no pending docs); else list pending docs
+    CASE
+        WHEN COALESCE(pdd.pdd_complete, 'Y') = 'Y' THEN 'No'
+        ELSE NULLIF(pdd.pdd_pending_docs, '')
+    END                                                        AS "PDD status, if pending (Mention any critical docs)",
 
     -- ── Scheme & Social Flags (Cols 110-118) ─────────────────────────────
 
@@ -961,11 +1115,16 @@ SELECT
     -- Col 116  [CANNOT FIND – ECLGS not applicable / not in DB]
     NULL                                                       AS "ECLGS",
 
-    -- Col 117  [CANNOT FIND – link loan pool flag not in DB]
-    NULL                                                       AS "Link loan Part of pool (Yes/ No)",
+    -- Col 117  (Y if loan is a Top-Up or BT+Topup, indicating linked loan in pool)
+    CASE
+        WHEN LOWER(NULLIF(TRIM(la.bt_type), '')) IN ('topup', 'balance transfer + topup',
+             'balance transfer + topup + child')                THEN 'Y'
+        WHEN lnk.parent_lan IS NOT NULL                        THEN 'Y'
+        ELSE 'N'
+    END                                                        AS "Link loan Part of pool (Yes/ No)",
 
-    -- Col 118  [CANNOT FIND – link loan number not in DB]
-    NULL                                                       AS "Link Loan/Top up loan Number if applicable",
+    -- Col 118  (parent loan account number for Top-Up / BT+Topup loans)
+    CAST(lnk.parent_lan AS VARCHAR)                            AS "Link Loan/Top up loan Number if applicable",
 
     -- ── NPA & PSL (Cols 119-120) ─────────────────────────────────────────
 
@@ -973,8 +1132,24 @@ SELECT
     CASE WHEN UPPER(COALESCE(la.npa_flag, 'N')) = 'Y' THEN 'Y' ELSE 'N' END
                                                                AS "Loan became NPA since origination (Y/N)",
 
-    -- Col 120  (c_psl from loan_dtl_cghfl: PSL/NPSL classification)
-    la.c_psl                                                   AS "PSL/NPSL flag",
+    -- Col 120  PSL/NPSL — RBI Priority Sector Lending criteria for housing loans:
+    --   Urban : Total Property Value < 45L AND Sanction Amount < 35L → PSL (Y)
+    --   Rural : Total Property Value < 30L AND Sanction Amount < 25L → PSL (Y)
+    --   Else  : NPSL (N)
+    --   c_psl from LMS used as override where populated (always 'N' for HE pool).
+    CASE
+        WHEN NULLIF(TRIM(la.c_psl), '') IS NOT NULL
+            THEN UPPER(TRIM(la.c_psl))
+        WHEN UPPER(TRIM(ast.sz_area_type)) IN ('RURAL')
+            AND ast.total_property_value < 3000000
+            AND la.f_sanctioned_amt      < 2500000
+            THEN 'Y'
+        WHEN (UPPER(TRIM(ast.sz_area_type)) IN ('URBAN') OR ast.sz_area_type IS NULL)
+            AND ast.total_property_value < 4500000
+            AND la.f_sanctioned_amt      < 3500000
+            THEN 'Y'
+        ELSE 'N'
+    END                                                        AS "PSL/NPSL flag",
 
     -- ── DPD Strings (Cols 121-126) ────────────────────────────────────────
 
@@ -1013,8 +1188,17 @@ SELECT
         CURRENT_DATE
     )                                                          AS "financial applicant age",
 
-    -- Col 128  (foir_wo_insurance stored as percentage e.g. 45.3 → output as-is in %)
-    ROUND(TRY_CAST(la.foir_wo_insurance AS DECIMAL(10, 2)), 2)  AS "FOIR",
+    -- Col 128: FOIR chain — with_insurance > wo_insurance > eligible_foir > Kuliza datamart
+    ROUND(
+        NULLIF(
+            COALESCE(
+                NULLIF(TRY_CAST(la.foir_with_insurance AS DECIMAL(10,2)), 0),
+                NULLIF(TRY_CAST(la.foir_wo_insurance   AS DECIMAL(10,2)), 0),
+                NULLIF(TRY_CAST(la.eligible_foir       AS DECIMAL(10,2)), 0),
+                NULLIF(kfoir.kuliza_foir,               0)
+            ),
+        0),
+    2)                                                             AS "FOIR",
 
     -- Col 129  (total_eligible_income from application_cghfl is MONTHLY; × 12 = annual)
     TRY_CAST(la.total_eligible_income AS DECIMAL(18, 2)) * 12  AS "Annual Income",
@@ -1044,6 +1228,8 @@ LEFT JOIN bounce_last12 bl12  ON bl12.sz_loan_account_no = la.sz_loan_account_no
 LEFT JOIN bounce_inception binc ON binc.sz_loan_account_no = la.sz_loan_account_no
 LEFT JOIN pdd_status    pdd   ON pdd.sz_loan_account_no  = la.sz_loan_account_no
 LEFT JOIN prov_max_dpd  pmax  ON pmax.sz_loan_account_no = la.sz_loan_account_no
+LEFT JOIN linked_lan    lnk   ON lnk.sz_loan_account_no  = la.sz_loan_account_no
+LEFT JOIN kuliza_foir   kfoir ON kfoir.sz_loan_account_no = la.sz_loan_account_no
 
 ORDER BY la.sz_loan_account_no;
 
